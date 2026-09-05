@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,11 +11,64 @@ from openbench_rerank_rl.losses import BNPOLossOutput
 from openbench_rerank_rl.parsers import DEFAULT_RUBRIC_HEADERS
 from openbench_rerank_rl.trainer import (
     GeneratedCompletion,
+    HuggingFacePolicyBackend,
     LogProbBatch,
     MaskPOTrainer,
     SamplingConfig,
     TrainingExample,
 )
+
+
+class _TinyTokenizer:
+    pad_token_id = 0
+    eos_token_id = 7
+    padding_side = "right"
+
+
+class _SelectiveLogitModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = torch.nn.Embedding(8, 3)
+        self.projection = torch.nn.Linear(3, 8, bias=False)
+        self.generation_config = SimpleNamespace(eos_token_id=7)
+        self.forward_training: list[bool] = []
+        self.kept_positions: list[tuple[int, ...]] = []
+
+    def get_input_embeddings(self):
+        return self.embedding
+
+    def forward(
+        self,
+        *,
+        input_ids,
+        attention_mask,
+        use_cache,
+        logits_to_keep=0,
+    ):
+        del attention_mask, use_cache
+        self.forward_training.append(self.training)
+        hidden = self.embedding(input_ids)
+        if isinstance(logits_to_keep, int):
+            indices = slice(-logits_to_keep, None)
+        else:
+            self.kept_positions.append(tuple(int(item) for item in logits_to_keep))
+            indices = logits_to_keep
+        return SimpleNamespace(logits=self.projection(hidden[:, indices, :]))
+
+
+class _FullLogitModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = torch.nn.Embedding(8, 3)
+        self.projection = torch.nn.Linear(3, 8, bias=False)
+        self.generation_config = SimpleNamespace(eos_token_id=7)
+
+    def get_input_embeddings(self):
+        return self.embedding
+
+    def forward(self, *, input_ids, attention_mask, use_cache):
+        del attention_mask, use_cache
+        return SimpleNamespace(logits=self.projection(self.embedding(input_ids)))
 
 
 def _completion(order: str) -> str:
@@ -282,3 +336,53 @@ def test_sampling_config_keeps_exact_generation_defaults():
         "top_k": 20,
         "top_p": 0.95,
     }
+
+
+def test_huggingface_logps_keep_only_prediction_positions_and_train_for_gradients():
+    torch.manual_seed(0)
+    model = _SelectiveLogitModel()
+    model.eval()
+    backend = HuggingFacePolicyBackend(model, _TinyTokenizer())
+    sample = GeneratedCompletion(
+        text="two tokens",
+        prompt_token_ids=(1, 2),
+        token_ids=(3, 4),
+        token_offsets=((0, 3), (4, 10)),
+    )
+
+    batch = backend.token_logps([sample], requires_grad=True)
+
+    assert model.forward_training == [True]
+    assert not model.training  # restore the caller's original mode
+    assert model.kept_positions == [(1, 2)]
+    assert batch.logps.shape == (1, 2)
+    assert batch.logps.requires_grad
+    batch.logps.sum().backward()
+    assert model.projection.weight.grad is not None
+
+
+def test_huggingface_logps_eval_no_grad_and_full_logit_fallback_are_exact():
+    torch.manual_seed(0)
+    model = _FullLogitModel()
+    model.train()
+    backend = HuggingFacePolicyBackend(model, _TinyTokenizer())
+    sample = GeneratedCompletion(
+        text="two tokens",
+        prompt_token_ids=(1, 2),
+        token_ids=(3, 4),
+        token_offsets=((0, 3), (4, 10)),
+    )
+
+    batch = backend.token_logps([sample], requires_grad=False)
+
+    assert model.training  # restore the caller's original mode
+    assert not batch.logps.requires_grad
+    ids = torch.tensor([[1, 2, 3, 4]])
+    with torch.no_grad():
+        full_logits = model.projection(model.embedding(ids))[0, 1:3]
+        expected = -torch.nn.functional.cross_entropy(
+            full_logits.float(),
+            torch.tensor([3, 4]),
+            reduction="none",
+        )
+    assert torch.allclose(batch.logps[0], expected)

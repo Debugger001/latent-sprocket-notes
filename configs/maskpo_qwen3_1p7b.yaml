@@ -12,7 +12,9 @@ model:
 
 data:
   # Supply --train-file on the CLI or replace this local, gitignored path.
-  train_file: data/processed/mind-small-train/train.jsonl
+  train_file: data/processed/mind-small-train-k20-800-seed42/train.jsonl
+  # RL is intentionally limited to slates the policy can reliably permute.
+  max_slate_size: 20
 
 generation:
   num_siblings: 4

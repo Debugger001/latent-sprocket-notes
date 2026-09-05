@@ -218,6 +218,7 @@ after all four originals and their probes have been sampled and scored.
 | --- | ---: |
 | Sibling originals per query | `4` |
 | Rubrics per valid original | `4` |
+| RL slate boundary | `K <= 20` |
 | Ranking metric | lenient binary nDCG |
 | Maximum format reward | `0.1` |
 | Mask residual scale `tau` | `0.05` |

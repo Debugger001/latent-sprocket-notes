@@ -26,6 +26,8 @@ generated checkpoints.
   structurally valid original.  A probe replaces exactly one rubric body with
   `[MASKED_RUBRIC_CONTENT]`, keeps the other three bodies fixed, and regenerates
   only the text after `**Synthesis:**`.
+- A deliberate `K <= 20` RL-training boundary, enforced again by the trainer
+  even when a prepared JSONL is supplied directly.
 - RMS-normalized signed rubric deltas without mean centering, position-level
   Rank-GRPO credit, rank-shift residuals, semantic token routing, and a safe
   sequence-advantage fallback.

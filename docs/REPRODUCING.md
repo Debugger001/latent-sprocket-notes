@@ -109,16 +109,19 @@ least one positive and adds the current prompt to the generated JSONL:
 python scripts/prepare_mind.py \
   --news data/raw/mind/MINDsmall_train/news.tsv \
   --behaviors data/raw/mind/MINDsmall_train/behaviors.tsv \
-  --output-dir data/processed/mind-small-train \
-  --max-candidates 50 \
+  --output-dir data/processed/mind-small-train-k20-800-seed42 \
+  --max-candidates 20 \
+  --sample-size 800 \
   --include-prompts \
   --seed 42
 ```
 
-The `K <= 50` boundary matches the inspected archived MaskPO evaluation rows.
-For a stable development subset, add `--sample-size N`.  To create a stable
-held-out partition within an input file, add `--validation-fraction F`.  The
-script emits `train.jsonl`, `validation.jsonl`, and `summary.json`.  All are
+The RL stage deliberately uses `K <= 20`, where the policy can produce exact
+permutations substantially more reliably. Evaluation may still report broader
+slate slices, but those rows are not included in this RL training set.
+For a different stable development subset, change `--sample-size N`. To create
+a stable held-out partition within an input file, add `--validation-fraction F`.
+The script emits `train.jsonl`, `validation.jsonl`, and `summary.json`. All are
 gitignored because they derive from licensed source data.
 
 Before a long run, inspect several prompts and confirm:
@@ -144,6 +147,7 @@ the canonical run:
 | --- | ---: |
 | original siblings | `4` |
 | rubric probes per structurally valid original | `4` |
+| RL slate boundary | `K <= 20` |
 | rank reward | lenient nDCG |
 | format reward maximum | `0.1` |
 | mask residual scale | `0.05` |
@@ -169,7 +173,7 @@ entry point reads the prepared JSONL and YAML configuration:
 ```bash
 python scripts/train_maskpo.py \
   --config configs/maskpo_qwen3_1p7b.yaml \
-  --train-file data/processed/mind-small-train/train.jsonl \
+  --train-file data/processed/mind-small-train-k20-800-seed42/train.jsonl \
   --max-query-steps 1 \
   --output-dir outputs/maskpo-smoke
 ```
@@ -179,7 +183,7 @@ Then remove the smoke-test override and launch the recorded configuration:
 ```bash
 python scripts/train_maskpo.py \
   --config configs/my_maskpo_run.yaml \
-  --train-file data/processed/mind-small-train/train.jsonl
+  --train-file data/processed/mind-small-train-k20-800-seed42/train.jsonl
 ```
 
 For each logged prompt group, verify diagnostics show:

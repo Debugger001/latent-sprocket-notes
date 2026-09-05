@@ -75,7 +75,11 @@ def load_config(path: Path) -> dict[str, Any]:
     return value
 
 
-def iter_training_examples(path: Path) -> Iterator[TrainingExample]:
+def iter_training_examples(
+    path: Path,
+    *,
+    max_slate_size: int | None = None,
+) -> Iterator[TrainingExample]:
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -99,6 +103,11 @@ def iter_training_examples(path: Path) -> Iterator[TrainingExample]:
                 )
             if type(slate_k) is not int:
                 raise ValueError(f"{path}:{line_number}: k must be an integer")
+            if max_slate_size is not None and slate_k > max_slate_size:
+                raise ValueError(
+                    f"{path}:{line_number}: k={slate_k} exceeds the configured "
+                    f"RL boundary K<={max_slate_size}; filter the prepared data"
+                )
             yield TrainingExample(
                 prompt=prompt,
                 positives=frozenset(positives),
@@ -196,6 +205,7 @@ def main() -> None:
     ):
         _require_canonical(maskpo, key, expected)
     _require_canonical(optimization, "objective", "tokenwise_bnpo")
+    _require_canonical(data, "max_slate_size", 20)
 
     train_file = Path(args.train_file or str(data["train_file"])).expanduser().resolve()
     output_dir = Path(args.output_dir or str(output["directory"])).expanduser().resolve()
@@ -205,6 +215,7 @@ def main() -> None:
     max_optimizer_steps = args.max_optimizer_steps or _positive_int(
         configured_optimizer_steps, "max_optimizer_steps"
     )
+    max_slate_size = _positive_int(data.get("max_slate_size", 20), "max_slate_size")
     seed = int(optimization.get("seed", 42))
 
     random.seed(seed)
@@ -302,6 +313,7 @@ def main() -> None:
         "config": str(config_path),
         "train_file": str(train_file),
         "seed": seed,
+        "max_slate_size": max_slate_size,
         "requested_optimizer_steps": max_optimizer_steps,
         "num_siblings": algorithm.num_siblings,
         "effective_prompt_batch_size": effective_prompt_batch_size,
@@ -325,7 +337,9 @@ def main() -> None:
     completed_queries = 0
     log_path = output_dir / "train_log.jsonl"
     with log_path.open("a", encoding="utf-8", newline="\n") as log_handle:
-        for example in iter_training_examples(train_file):
+        for example in iter_training_examples(
+            train_file, max_slate_size=max_slate_size
+        ):
             if trainer.optimizer_steps >= max_optimizer_steps:
                 break
             if (

@@ -24,6 +24,7 @@ def test_checked_in_training_config_matches_canonical_constants():
     assert config["generation"]["top_p"] == 0.95
     assert config["generation"]["max_new_tokens"] == 2048
     assert config["generation"]["counterfactual_max_new_tokens"] == 2048
+    assert config["data"]["max_slate_size"] == 20
     assert config["maskpo"]["num_rubrics"] == 4
     assert config["maskpo"]["tau_mask"] == 0.05
     assert config["maskpo"]["mask_clip"] == 2.0
@@ -71,3 +72,21 @@ def test_training_jsonl_reader_requires_prompt_and_preserves_labels(tmp_path):
     )
     with pytest.raises(ValueError, match="--include-prompts"):
         list(TRAIN_SCRIPT.iter_training_examples(path))
+
+
+def test_training_jsonl_reader_enforces_rl_slate_boundary(tmp_path):
+    path = tmp_path / "train.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "too-large",
+                "prompt": "rank",
+                "positive_indices": [1],
+                "k": 21,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"K<=20"):
+        list(TRAIN_SCRIPT.iter_training_examples(path, max_slate_size=20))

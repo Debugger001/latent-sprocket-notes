@@ -16,6 +16,7 @@ Transformers, PEFT, Accelerate, or even PyTorch.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -498,11 +499,35 @@ class HuggingFacePolicyBackend:
     def __init__(self, model: Any, tokenizer: Any) -> None:
         self.model = model
         self.tokenizer = tokenizer
+        self._supports_logits_to_keep = self._model_supports_logits_to_keep()
         if self.tokenizer.pad_token_id is None:
             if self.tokenizer.eos_token_id is None:
                 raise ValueError("tokenizer needs a pad token or EOS token")
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "left"
+
+    def _model_supports_logits_to_keep(self) -> bool:
+        """Whether the underlying causal LM can skip prompt-token logits.
+
+        PEFT's public ``forward`` accepts arbitrary keyword arguments, so its
+        signature alone cannot tell us whether the wrapped Transformers model
+        implements ``logits_to_keep``.  Inspect the unwrapped model when PEFT
+        exposes it and conservatively fall back to the full-logit path for
+        other architectures.
+        """
+
+        candidate = self.model
+        get_base_model = getattr(candidate, "get_base_model", None)
+        if callable(get_base_model):
+            try:
+                candidate = get_base_model()
+            except (AttributeError, TypeError):
+                return False
+        try:
+            parameters = inspect.signature(candidate.forward).parameters
+        except (TypeError, ValueError):
+            return False
+        return "logits_to_keep" in parameters
 
     def render_user_prompt(self, prompt: str) -> str:
         messages = [{"role": "user", "content": prompt}]
@@ -659,9 +684,11 @@ class HuggingFacePolicyBackend:
         torch = _torch()
         device = self._input_device()
         was_training = self.model.training
-        # Eval mode makes old/current probabilities comparable even for models
-        # with dropout.  Autograd remains fully enabled for the current pass.
-        self.model.eval()
+        # Qwen3 has no training-time dropout.  The differentiable pass must be
+        # in train mode because Transformers activates gradient checkpointing
+        # only when ``model.training`` is true.  Fixed old/reference passes
+        # remain in eval mode and under no_grad.
+        self.model.train(requires_grad)
         rows: list[Tensor] = []
         context = nullcontext() if requires_grad else torch.no_grad()
         try:
@@ -673,17 +700,37 @@ class HuggingFacePolicyBackend:
                         [ids], dtype=torch.long, device=device
                     )
                     attention_mask = torch.ones_like(input_ids)
-                    output = self.model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        use_cache=False,
-                    )
-                    logits = output.logits[
-                        0, prompt_length - 1 : len(ids) - 1, :
-                    ].float()
+                    model_kwargs: dict[str, object] = {
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask,
+                        "use_cache": False,
+                    }
+                    if self._supports_logits_to_keep:
+                        # Completion token t is predicted by the preceding
+                        # sequence position.  Qwen3 applies these indices to
+                        # hidden states before lm_head, avoiding an otherwise
+                        # enormous [prompt, vocabulary] logits allocation.
+                        model_kwargs["logits_to_keep"] = torch.arange(
+                            prompt_length - 1,
+                            len(ids) - 1,
+                            dtype=torch.long,
+                            device=input_ids.device,
+                        )
+                    output = self.model(**model_kwargs)
+                    if self._supports_logits_to_keep:
+                        logits = output.logits[0]
+                    else:
+                        logits = output.logits[
+                            0, prompt_length - 1 : len(ids) - 1, :
+                        ]
                     targets = input_ids[0, prompt_length:].to(logits.device)
-                    selected = logits.gather(1, targets[:, None]).squeeze(1)
-                    rows.append(selected - torch.logsumexp(logits, dim=-1))
+                    rows.append(
+                        -torch.nn.functional.cross_entropy(
+                            logits.float(),
+                            targets,
+                            reduction="none",
+                        )
+                    )
         finally:
             self.model.train(was_training)
 
