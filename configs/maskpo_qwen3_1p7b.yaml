@@ -83,7 +83,7 @@ tracking:
     # --wandb-mode disabled override only for a local smoke test.
     mode: online
     project: maskpo-mind
-    entity: changliu11
+    entity: franknlp
     name: maskpo-qwen3-1p7b-p2-rubric-sft
     group: canonical-maskpo
     tags: [mind, maskpo, qwen3-1.7b, p2-rubric-sft]

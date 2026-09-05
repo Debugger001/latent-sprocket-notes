@@ -216,7 +216,7 @@ python -m pip install -e '.[data,training,tracking,dev]'
 wandb login
 ```
 
-The checked-in run uses W&B online mode in project `changliu11/maskpo-mind`.
+The checked-in run uses W&B online mode in project `franknlp/maskpo-mind`.
 Only a whitelisted set of hyperparameters and scalar train, validation,
 progress, and checkpoint-event metrics is sent. API credentials, prompts,
 completions, example IDs, full filesystem paths, source code, and checkpoint

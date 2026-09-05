@@ -46,7 +46,7 @@ def test_checked_in_training_config_matches_canonical_constants():
     assert config["validation"]["generation_batch_size"] == 16
     assert config["tracking"]["wandb"]["mode"] == "online"
     assert config["tracking"]["wandb"]["project"] == "maskpo-mind"
-    assert config["tracking"]["wandb"]["entity"] == "changliu11"
+    assert config["tracking"]["wandb"]["entity"] == "franknlp"
     assert config["output"]["directory"] == "outputs/maskpo-qwen3-1.7b"
     assert config["output"]["checkpoint_rollout_steps"] == 5
     assert config["output"]["keep_checkpoints"] == 2

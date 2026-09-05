@@ -98,7 +98,7 @@ The separate MIND-small dev materialization used for final evaluation is
 recorded at `data/processed/mind-small-dev-k20-10k-seed42/eval.jsonl`.
 
 The canonical configuration streams only explicitly whitelisted scalar metrics
-to the `changliu11/maskpo-mind` W&B project. Authenticate on the training host
+to the `franknlp/maskpo-mind` W&B project. Authenticate on the training host
 with `wandb login`; never place an API key in YAML or a command-line argument.
 Prompts, completions, example IDs, full local paths, source code, and model
 checkpoints are not uploaded by this runtime.
