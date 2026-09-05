@@ -26,6 +26,17 @@ class _TinyTokenizer:
     padding_side = "right"
 
 
+class _NonCanonicalTokenizer(_TinyTokenizer):
+    all_special_ids = []
+
+    def decode(self, token_ids, **_kwargs):
+        return "".join({1: "a", 2: "b", 3: "ab"}[token_id] for token_id in token_ids)
+
+    def __call__(self, text, **_kwargs):
+        assert text == "ab"
+        return {"input_ids": [3], "offset_mapping": [(0, 2)]}
+
+
 class _SelectiveLogitModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -360,6 +371,13 @@ def test_huggingface_logps_keep_only_prediction_positions_and_train_for_gradient
     assert batch.logps.requires_grad
     batch.logps.sum().backward()
     assert model.projection.weight.grad is not None
+
+
+def test_decode_offsets_preserve_noncanonical_sampled_bpe_path():
+    backend = HuggingFacePolicyBackend(_FullLogitModel(), _NonCanonicalTokenizer())
+    text, offsets = backend._decode_with_offsets([1, 2])
+    assert text == "ab"
+    assert offsets == ((0, 1), (1, 2))
 
 
 def test_huggingface_logps_eval_no_grad_and_full_logit_fallback_are_exact():

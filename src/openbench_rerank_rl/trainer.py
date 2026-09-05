@@ -527,7 +527,7 @@ class HuggingFacePolicyBackend:
                 return False
         try:
             parameters = inspect.signature(candidate.forward).parameters
-        except (TypeError, ValueError):
+        except (AttributeError, TypeError, ValueError):
             return False
         return "logits_to_keep" in parameters
 
@@ -603,7 +603,42 @@ class HuggingFacePolicyBackend:
             reencoded = encoded["input_ids"]
             visible_offsets = encoded["offset_mapping"]
             if list(reencoded) != visible_ids or len(visible_offsets) != len(visible_ids):
-                return text, tuple(offsets)
+                # Sampled BPE paths need not be the tokenizer's canonical
+                # re-encoding of their decoded text. Recover exact spans from
+                # the sampled IDs themselves instead of discarding semantic
+                # routing for an otherwise valid completion.
+                pieces = [
+                    self.tokenizer.decode(
+                        [token_id],
+                        skip_special_tokens=False,
+                        clean_up_tokenization_spaces=False,
+                    )
+                    for token_id in visible_ids
+                ]
+                if "".join(pieces) == text:
+                    cursor = 0
+                    visible_offsets = []
+                    for piece in pieces:
+                        visible_offsets.append((cursor, cursor + len(piece)))
+                        cursor += len(piece)
+                else:
+                    # Byte-fallback tokens may only decode correctly as a
+                    # prefix chain. This path is O(tokens^2) but is rare and
+                    # bounded by the generation limit.
+                    visible_offsets = []
+                    previous = ""
+                    for end_index in range(1, len(visible_ids) + 1):
+                        decoded_prefix = self.tokenizer.decode(
+                            visible_ids[:end_index],
+                            skip_special_tokens=False,
+                            clean_up_tokenization_spaces=False,
+                        )
+                        if not decoded_prefix.startswith(previous):
+                            return text, tuple(offsets)
+                        visible_offsets.append((len(previous), len(decoded_prefix)))
+                        previous = decoded_prefix
+                    if previous != text:
+                        return text, tuple(offsets)
             visible_index = 0
             for index, token_id in enumerate(token_ids):
                 if token_id in special_ids:
