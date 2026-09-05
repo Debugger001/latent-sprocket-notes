@@ -16,7 +16,9 @@ Transformers, PEFT, Accelerate, or even PyTorch.
 
 from __future__ import annotations
 
+import copy
 import inspect
+import warnings
 from collections.abc import Iterable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -776,6 +778,62 @@ def _resolve_dtype(name: str):
         raise ValueError(f"unsupported model dtype: {name!r}") from exc
 
 
+def _targets_with_serialized_lora_weights(
+    configured_targets: Iterable[str],
+    tensor_names: Iterable[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Separate configured LoRA targets into serialized and missing targets."""
+
+    configured = tuple(dict.fromkeys(str(name) for name in configured_targets))
+    components: dict[str, set[str]] = {"A": set(), "B": set()}
+    for tensor_name in tensor_names:
+        for component in components:
+            marker = f".lora_{component}."
+            if marker not in tensor_name:
+                continue
+            module_path = tensor_name.split(marker, 1)[0]
+            components[component].add(module_path.rsplit(".", 1)[-1])
+    complete = components["A"] & components["B"]
+    retained = tuple(name for name in configured if name in complete)
+    missing = tuple(name for name in configured if name not in complete)
+    return retained, missing
+
+
+def _load_effective_peft_config(adapter_path: str, peft_config_class: Any) -> Any:
+    """Load PEFT config without injecting targets absent from the checkpoint.
+
+    The archived Phase-2 config names ``lm_head``, but its exact safetensors
+    file contains no lm_head LoRA A/B tensors.  Letting PEFT instantiate that
+    absent target would silently add a fresh trainable adapter and cause tied
+    embedding weights to be copied into every saved checkpoint.
+    """
+
+    config = peft_config_class.from_pretrained(adapter_path)
+    configured_targets = getattr(config, "target_modules", None)
+    weights_path = Path(adapter_path) / "adapter_model.safetensors"
+    if not configured_targets or not weights_path.is_file():
+        return config
+
+    try:
+        from safetensors import safe_open
+    except ImportError as exc:  # pragma: no cover - PEFT normally installs it
+        raise ImportError("loading the archived adapter requires safetensors") from exc
+    with safe_open(weights_path, framework="pt", device="cpu") as handle:
+        retained, missing = _targets_with_serialized_lora_weights(
+            configured_targets, handle.keys()
+        )
+    if not retained:
+        raise ValueError(f"{weights_path} contains no complete configured LoRA targets")
+    if missing:
+        warnings.warn(
+            "Ignoring configured LoRA target modules with no serialized A/B "
+            f"weights in the archived adapter: {list(missing)}",
+            stacklevel=2,
+        )
+        config.target_modules = set(retained)
+    return config
+
+
 def load_huggingface_maskpo_trainer(
     *,
     model_name_or_path: str,
@@ -808,7 +866,7 @@ def load_huggingface_maskpo_trainer(
     if weight_decay < 0:
         raise ValueError("weight_decay must be non-negative")
     try:
-        from peft import PeftModel
+        from peft import PeftConfig, PeftModel
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError as exc:  # pragma: no cover - depends on optional install
         raise ImportError(
@@ -830,6 +888,7 @@ def load_huggingface_maskpo_trainer(
         adapter_path,
         trust_remote_code=trust_remote_code,
     )
+    archived_peft_config = _load_effective_peft_config(adapter_path, PeftConfig)
     actor_base = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         **common_model_kwargs,
@@ -837,6 +896,7 @@ def load_huggingface_maskpo_trainer(
     actor_model = PeftModel.from_pretrained(
         actor_base,
         adapter_path,
+        config=copy.deepcopy(archived_peft_config),
         is_trainable=True,
     )
     if gradient_checkpointing:
@@ -856,6 +916,7 @@ def load_huggingface_maskpo_trainer(
     reference_model = PeftModel.from_pretrained(
         reference_base,
         adapter_path,
+        config=copy.deepcopy(archived_peft_config),
         is_trainable=False,
     )
     reference_model.requires_grad_(False)

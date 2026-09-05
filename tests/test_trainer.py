@@ -16,6 +16,7 @@ from openbench_rerank_rl.trainer import (
     MaskPOTrainer,
     SamplingConfig,
     TrainingExample,
+    _targets_with_serialized_lora_weights,
 )
 
 
@@ -386,3 +387,17 @@ def test_huggingface_logps_eval_no_grad_and_full_logit_fallback_are_exact():
             reduction="none",
         )
     assert torch.allclose(batch.logps[0], expected)
+
+
+def test_adapter_targets_are_limited_to_complete_serialized_lora_pairs():
+    retained, missing = _targets_with_serialized_lora_weights(
+        ["q_proj", "k_proj", "lm_head"],
+        [
+            "base.model.layers.0.q_proj.lora_A.weight",
+            "base.model.layers.0.q_proj.lora_B.weight",
+            "base.model.layers.0.k_proj.lora_A.weight",
+            "base.model.lm_head.lora_A.weight",
+        ],
+    )
+    assert retained == ("q_proj",)
+    assert missing == ("k_proj", "lm_head")

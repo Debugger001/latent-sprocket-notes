@@ -143,6 +143,11 @@ def _diagnostic_row(query_step: int, result: Any) -> dict[str, object]:
     region_counts = Counter(
         region for route in result.routes for region in route.regions
     )
+    fallback_reasons = Counter(
+        route.fallback_reason
+        for route in result.routes
+        if route.used_sequence_fallback and route.fallback_reason is not None
+    )
     return {
         "query_step": query_step,
         "example_id": result.example_id,
@@ -159,6 +164,7 @@ def _diagnostic_row(query_step: int, result: Any) -> dict[str, object]:
         ),
         "rubric_rms_scale": result.query_credit.rubric_rms_scale,
         "routing_fallbacks": result.routing_fallback_count,
+        "routing_fallback_reasons": dict(sorted(fallback_reasons.items())),
         "unavailable_rubric_bodies": sum(
             len(route.unavailable_rubrics) for route in result.routes
         ),

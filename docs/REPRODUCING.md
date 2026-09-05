@@ -64,6 +64,12 @@ The source ZIP, extracted adapter, and manifest are ignored by Git.  Preserve
 the manifest beside experiment metadata to establish exactly which SFT bytes
 started the run.
 
+The archived PEFT config lists `lm_head` as a LoRA target, but the exact
+adapter safetensors contains no `lm_head` A/B tensors (the other seven target
+types have 392 complete tensors). The loader derives its effective target set
+from those serialized pairs, so it does not silently introduce a new random
+`lm_head` adapter or copy tied embedding weights into every checkpoint.
+
 ## 3. Obtain MIND under its upstream terms
 
 The official MIND page is <https://msnews.github.io/>.  The current download is
