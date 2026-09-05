@@ -250,6 +250,7 @@ class MaskPOTrainer:
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
         self._pending_micro_steps = 0
+        self._pending_active_tokens = 0
         self._optimizer_steps = 0
 
     @property
@@ -259,6 +260,10 @@ class MaskPOTrainer:
     @property
     def pending_micro_steps(self) -> int:
         return self._pending_micro_steps
+
+    @property
+    def pending_active_tokens(self) -> int:
+        return self._pending_active_tokens
 
     def _generate_batched(
         self,
@@ -385,25 +390,30 @@ class MaskPOTrainer:
             ):
                 raise ValueError(f"{name} completion mask differs from current mask")
 
-    def _apply_gradients_if_ready(self) -> bool:
+    def _apply_gradients_if_ready(self, active_token_count: int) -> bool:
         self._pending_micro_steps += 1
+        self._pending_active_tokens += active_token_count
         if self._pending_micro_steps < self.gradient_accumulation_steps:
             return False
         self._finish_optimizer_step()
         return True
 
-    def _finish_optimizer_step(self, *, partial_rescale: float = 1.0) -> None:
+    def _finish_optimizer_step(self) -> None:
         torch = _torch()
         parameters = tuple(self.actor.trainable_parameters())
-        if partial_rescale != 1.0:
-            for parameter in parameters:
-                if parameter.grad is not None:
-                    parameter.grad.mul_(partial_rescale)
+        # Micro-queries backpropagate token-loss sums.  Normalize once over all
+        # active tokens in the complete (or flushed partial) accumulation window
+        # so variable-length query groups receive true batch-normalized weight.
+        denominator = max(self._pending_active_tokens, 1)
+        for parameter in parameters:
+            if parameter.grad is not None:
+                parameter.grad.div_(denominator)
         if self.max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(parameters, self.max_grad_norm)
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
         self._pending_micro_steps = 0
+        self._pending_active_tokens = 0
         self._optimizer_steps += 1
 
     def flush_gradients(self) -> bool:
@@ -411,10 +421,7 @@ class MaskPOTrainer:
 
         if self._pending_micro_steps == 0:
             return False
-        # Each micro-loss was divided by the configured accumulation size.  A
-        # partial final window should instead average over the rows it contains.
-        scale = self.gradient_accumulation_steps / self._pending_micro_steps
-        self._finish_optimizer_step(partial_rescale=scale)
+        self._finish_optimizer_step()
         return True
 
     def train_query(self, example: TrainingExample) -> TrainStepResult:
@@ -459,11 +466,12 @@ class MaskPOTrainer:
             clip_epsilon=self.ppo_clip,
             beta=self.reference_kl_coefficient,
         )
-        scaled_loss = loss_output.loss / self.gradient_accumulation_steps
-        if not scaled_loss.requires_grad:
+        active_token_count = int(loss_output.token_count.detach().to("cpu").item())
+        summed_loss = loss_output.loss * active_token_count
+        if not summed_loss.requires_grad:
             raise RuntimeError("actor log probabilities do not carry gradients")
-        scaled_loss.backward()
-        optimizer_stepped = self._apply_gradients_if_ready()
+        summed_loss.backward()
+        optimizer_stepped = self._apply_gradients_if_ready(active_token_count)
 
         def scalar(value: Tensor) -> float:
             return float(value.detach().to(dtype=torch.float32, device="cpu").item())
@@ -478,7 +486,7 @@ class MaskPOTrainer:
             policy_loss=scalar(loss_output.policy_loss),
             kl=scalar(loss_output.kl),
             clip_fraction=scalar(loss_output.clip_fraction),
-            active_token_count=int(loss_output.token_count.detach().to("cpu").item()),
+            active_token_count=active_token_count,
             optimizer_stepped=optimizer_stepped,
             optimizer_step=self._optimizer_steps,
         )

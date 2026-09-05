@@ -230,9 +230,14 @@ after all four originals and their probes have been sampled and scored.
 | Sampling top-k | `20` |
 | Sampling top-p | `0.95` |
 | Maximum new tokens, originals and probes | `2048` |
-| Effective originals per optimizer update | `8` initially (`16` after memory profiling) |
+| Distinct prompts per optimizer update | `8` initially (`16` after throughput profiling) |
+| Effective originals per optimizer update | `32` initially (`64` at prompt batch 16) |
 
 These runtime hyperparameters specify the current new run; they are not claims
-about an unrecoverable historical optimizer configuration.  Batch 8 is formed
-by accumulating two four-original query groups.  Batch 16 requires four query
-groups per update and should be enabled only after the batch-8 memory profile.
+about an unrecoverable historical optimizer configuration.  Prompt batch 8 is
+formed by accumulating eight distinct query groups, each with four sibling
+originals, before one update.  Prompt batch 16 accumulates sixteen groups and
+should be enabled only after profiling throughput.  Accumulation retains the
+exact BNPO reduction: token-loss sums and active-token counts are accumulated,
+then the gradient is normalized once over all active original tokens in the
+optimizer batch.

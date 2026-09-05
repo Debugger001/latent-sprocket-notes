@@ -30,7 +30,9 @@ generated checkpoints.
   Rank-GRPO credit, rank-shift residuals, semantic token routing, and a safe
   sequence-advantage fallback.
 - Tokenwise clipped BNPO with PPO clip `0.2` and reference-KL coefficient
-  `0.001`.  Counterfactual suffixes are scoring probes and receive no gradient.
+  `0.001`. Eight distinct prompts (32 originals) are accumulated per optimizer
+  update and normalized once over all active original tokens. Counterfactual
+  suffixes are scoring probes and receive no gradient.
 
 The precise equations and edge-case rules are in
 [docs/ALGORITHMS.md](docs/ALGORITHMS.md).

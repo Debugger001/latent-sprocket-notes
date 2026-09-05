@@ -6,6 +6,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from openbench_rerank_rl.losses import BNPOLossOutput
 from openbench_rerank_rl.parsers import DEFAULT_RUBRIC_HEADERS
 from openbench_rerank_rl.trainer import (
     GeneratedCompletion,
@@ -114,6 +115,24 @@ class RecordingSGD(torch.optim.SGD):
         return super().step(closure)
 
 
+def _controlled_mean_loss(specs):
+    remaining = iter(specs)
+
+    def loss(current_logps, *_args, **_kwargs):
+        token_count, mean_gradient = next(remaining)
+        mean = current_logps[0, 0] * mean_gradient
+        zero = mean.detach() * 0.0
+        return BNPOLossOutput(
+            loss=mean,
+            policy_loss=mean,
+            kl=zero,
+            clip_fraction=zero,
+            token_count=torch.tensor(token_count, device=current_logps.device),
+        )
+
+    return loss
+
+
 def test_training_step_samples_all_probes_before_originals_only_loss():
     events: list[tuple] = []
     actor = FakeBackend("actor", events, trainable=True)
@@ -174,6 +193,78 @@ def test_gradient_accumulation_flushes_partial_window():
     assert trainer.flush_gradients()
     assert trainer.optimizer_steps == 1
     assert not trainer.flush_gradients()
+
+
+def test_gradient_accumulation_normalizes_once_over_all_active_tokens(monkeypatch):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=2,
+        max_grad_norm=None,
+    )
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss",
+        _controlled_mean_loss([(2, 1.0), (8, 3.0)]),
+    )
+
+    first = trainer.train_query(TrainingExample("prompt-1", frozenset({1}), 3))
+    second = trainer.train_query(TrainingExample("prompt-2", frozenset({1}), 3))
+
+    assert not first.optimizer_stepped
+    assert second.optimizer_stepped
+    assert trainer.pending_active_tokens == 0
+    # The accumulated gradient is (2 * 1 + 8 * 3) / (2 + 8) = 2.6.
+    assert actor.parameter.item() == pytest.approx(-0.026)
+
+
+def test_partial_accumulation_uses_its_actual_active_token_count(monkeypatch):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=4,
+        max_grad_norm=None,
+    )
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss",
+        _controlled_mean_loss([(7, 2.5)]),
+    )
+
+    result = trainer.train_query(TrainingExample("prompt", frozenset({1}), 3))
+    assert not result.optimizer_stepped
+    assert trainer.pending_active_tokens == 7
+    assert trainer.flush_gradients()
+    assert trainer.pending_active_tokens == 0
+    assert actor.parameter.item() == pytest.approx(-0.025)
+
+
+def test_single_micro_step_preserves_mean_loss_gradient(monkeypatch):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=1,
+        max_grad_norm=None,
+    )
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss",
+        _controlled_mean_loss([(11, 1.75)]),
+    )
+
+    result = trainer.train_query(TrainingExample("prompt", frozenset({1}), 3))
+
+    assert result.optimizer_stepped
+    assert actor.parameter.item() == pytest.approx(-0.0175)
 
 
 def test_training_example_rejects_out_of_range_positive():

@@ -29,7 +29,18 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("configs/maskpo_qwen3_1p7b.yaml"),
     )
     parser.add_argument("--train-file", type=Path)
-    parser.add_argument("--max-steps", type=int)
+    parser.add_argument(
+        "--max-optimizer-steps",
+        "--max-steps",
+        dest="max_optimizer_steps",
+        type=int,
+        help="number of optimizer updates (the --max-steps alias has the same meaning)",
+    )
+    parser.add_argument(
+        "--max-query-steps",
+        type=int,
+        help="optional prompt-group cap, primarily for a partial-window smoke test",
+    )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument(
         "--device-map",
@@ -119,12 +130,12 @@ def _save_actor(trainer: Any, destination: Path) -> None:
     actor.save_pretrained(destination)
 
 
-def _diagnostic_row(step: int, result: Any) -> dict[str, object]:
+def _diagnostic_row(query_step: int, result: Any) -> dict[str, object]:
     region_counts = Counter(
         region for route in result.routes for region in route.regions
     )
     return {
-        "step": step,
+        "query_step": query_step,
         "example_id": result.example_id,
         "loss": result.loss,
         "policy_loss": result.policy_loss,
@@ -157,8 +168,10 @@ def _diagnostic_row(step: int, result: Any) -> dict[str, object]:
 
 def main() -> None:
     args = _parser().parse_args()
-    if args.max_steps is not None and args.max_steps <= 0:
-        raise SystemExit("--max-steps must be positive")
+    if args.max_optimizer_steps is not None and args.max_optimizer_steps <= 0:
+        raise SystemExit("--max-optimizer-steps must be positive")
+    if args.max_query_steps is not None and args.max_query_steps <= 0:
+        raise SystemExit("--max-query-steps must be positive")
 
     config_path = args.config.expanduser().resolve()
     config = load_config(config_path)
@@ -186,7 +199,12 @@ def main() -> None:
 
     train_file = Path(args.train_file or str(data["train_file"])).expanduser().resolve()
     output_dir = Path(args.output_dir or str(output["directory"])).expanduser().resolve()
-    max_steps = args.max_steps or _positive_int(optimization["max_steps"], "max_steps")
+    configured_optimizer_steps = optimization.get(
+        "max_optimizer_steps", optimization.get("max_steps")
+    )
+    max_optimizer_steps = args.max_optimizer_steps or _positive_int(
+        configured_optimizer_steps, "max_optimizer_steps"
+    )
     seed = int(optimization.get("seed", 42))
 
     random.seed(seed)
@@ -229,7 +247,18 @@ def main() -> None:
         if args.reference_device_map is not None
         else model.get("reference_device_map")
     )
-    accumulation_steps = int(optimization.get("gradient_accumulation_steps", 2))
+    accumulation_steps = _positive_int(
+        optimization.get("gradient_accumulation_steps", 8),
+        "gradient_accumulation_steps",
+    )
+    effective_prompt_batch_size = int(
+        optimization.get("effective_prompt_batch_size", accumulation_steps)
+    )
+    if effective_prompt_batch_size != accumulation_steps:
+        raise ValueError(
+            "effective_prompt_batch_size must equal gradient_accumulation_steps "
+            "because each microstep contains one prompt"
+        )
     effective_batch_size = int(
         optimization.get(
             "effective_original_batch_size",
@@ -273,8 +302,9 @@ def main() -> None:
         "config": str(config_path),
         "train_file": str(train_file),
         "seed": seed,
-        "requested_steps": max_steps,
+        "requested_optimizer_steps": max_optimizer_steps,
         "num_siblings": algorithm.num_siblings,
+        "effective_prompt_batch_size": effective_prompt_batch_size,
         "effective_original_batch_size": effective_batch_size,
         "gradient_accumulation_steps": accumulation_steps,
         "torch": torch.__version__,
@@ -284,41 +314,68 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    log_steps = _positive_int(output.get("log_steps", 1), "log_steps")
-    save_steps = _positive_int(output.get("save_steps", 25), "save_steps")
-    completed = 0
+    log_query_steps = _positive_int(
+        output.get("log_query_steps", output.get("log_steps", 1)),
+        "log_query_steps",
+    )
+    save_optimizer_steps = _positive_int(
+        output.get("save_optimizer_steps", output.get("save_steps", 25)),
+        "save_optimizer_steps",
+    )
+    completed_queries = 0
     log_path = output_dir / "train_log.jsonl"
     with log_path.open("a", encoding="utf-8", newline="\n") as log_handle:
-        for completed, example in enumerate(iter_training_examples(train_file), start=1):
-            if completed > max_steps:
-                completed -= 1
+        for example in iter_training_examples(train_file):
+            if trainer.optimizer_steps >= max_optimizer_steps:
                 break
+            if (
+                args.max_query_steps is not None
+                and completed_queries >= args.max_query_steps
+            ):
+                break
+            completed_queries += 1
             result = trainer.train_query(example)
-            diagnostic = _diagnostic_row(completed, result)
+            diagnostic = _diagnostic_row(completed_queries, result)
             log_handle.write(
                 json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":"))
                 + "\n"
             )
             log_handle.flush()
-            if completed % log_steps == 0:
+            if completed_queries % log_query_steps == 0:
                 print(json.dumps(diagnostic, sort_keys=True))
-            if completed % save_steps == 0:
-                _save_actor(trainer, output_dir / f"checkpoint-step-{completed}")
+            if (
+                result.optimizer_stepped
+                and result.optimizer_step % save_optimizer_steps == 0
+            ):
+                _save_actor(
+                    trainer,
+                    output_dir / f"checkpoint-update-{result.optimizer_step}",
+                )
 
     trainer.flush_gradients()
     _save_actor(trainer, output_dir / "final-adapter")
     final_state = {
         **metadata,
-        "completed_steps": completed,
+        "completed_query_steps": completed_queries,
         "optimizer_steps": trainer.optimizer_steps,
+        "stop_reason": (
+            "optimizer_target"
+            if trainer.optimizer_steps >= max_optimizer_steps
+            else "query_limit"
+            if args.max_query_steps is not None
+            and completed_queries >= args.max_query_steps
+            else "input_exhausted"
+        ),
     }
     (output_dir / "final_state.json").write_text(
         json.dumps(final_state, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    if completed < max_steps:
+    if trainer.optimizer_steps < max_optimizer_steps and args.max_query_steps is None:
         print(
-            f"Training input ended after {completed} rows; requested {max_steps}.",
+            "Training input ended after "
+            f"{completed_queries} prompts / {trainer.optimizer_steps} optimizer "
+            f"updates; requested {max_optimizer_steps} optimizer updates.",
             flush=True,
         )
     print(f"Saved final adapter to {output_dir / 'final-adapter'}")

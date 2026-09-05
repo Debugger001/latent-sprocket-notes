@@ -50,16 +50,19 @@ optimization:
   reference_kl_coefficient: 0.001
   learning_rate: 1.0e-5
   weight_decay: 0.0
-  # Four sibling originals x two query microsteps = eight original rollouts
-  # per optimizer update. Set both values to 16 / 4 to stretch to batch 16.
-  effective_original_batch_size: 8
-  gradient_accumulation_steps: 2
+  # One microstep is one distinct prompt with four sibling originals. Accumulate
+  # eight prompts before updating: 8 prompts / 32 originals per optimizer step.
+  # A later batch-16 run uses 16 / 64 / 16 for these three fields.
+  effective_prompt_batch_size: 8
+  effective_original_batch_size: 32
+  gradient_accumulation_steps: 8
   max_grad_norm: 1.0
-  max_steps: 100
+  # Optimizer updates, not prompt-level microsteps.
+  max_optimizer_steps: 100
   seed: 42
 
 output:
   # REPRODUCIBILITY DEFAULTS: local artifacts remain ignored by Git.
   directory: outputs/maskpo-qwen3-1.7b
-  log_steps: 1
-  save_steps: 25
+  log_query_steps: 1
+  save_optimizer_steps: 25

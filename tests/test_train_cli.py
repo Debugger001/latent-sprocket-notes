@@ -31,9 +31,19 @@ def test_checked_in_training_config_matches_canonical_constants():
     assert config["optimization"]["ppo_clip"] == 0.2
     assert config["optimization"]["reference_kl_coefficient"] == 0.001
     assert config["optimization"]["learning_rate"] == 1e-5
-    assert config["optimization"]["effective_original_batch_size"] == 8
-    assert config["optimization"]["gradient_accumulation_steps"] == 2
+    assert config["optimization"]["effective_prompt_batch_size"] == 8
+    assert config["optimization"]["effective_original_batch_size"] == 32
+    assert config["optimization"]["gradient_accumulation_steps"] == 8
+    assert config["optimization"]["max_optimizer_steps"] == 100
     assert config["output"]["directory"] == "outputs/maskpo-qwen3-1.7b"
+
+
+def test_step_flag_counts_optimizer_updates_and_query_cap_is_separate():
+    args = TRAIN_SCRIPT._parser().parse_args(
+        ["--max-steps", "3", "--max-query-steps", "7"]
+    )
+    assert args.max_optimizer_steps == 3
+    assert args.max_query_steps == 7
 
 
 def test_training_jsonl_reader_requires_prompt_and_preserves_labels(tmp_path):

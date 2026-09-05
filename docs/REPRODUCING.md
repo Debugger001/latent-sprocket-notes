@@ -96,6 +96,9 @@ raw files from this repository.  `behaviors.tsv` supplies impression, user,
 timestamp, ordered history, and candidate click labels; `news.tsv` supplies
 news ID, category, subcategory, title, abstract, URL, and two entity fields.
 Only category, subcategory, title, and abstract are rendered into prompts.
+The official `MINDsmall_train.zip` currently has 52,953,372 bytes and SHA-256
+`a966e5138ad103376e9817e02395719bf1c62ec56e6e98c30d46fbb991a7fafa`;
+record and verify that digest if the approved file is transferred between hosts.
 
 ## 4. Prepare deterministic examples
 
@@ -107,10 +110,12 @@ python scripts/prepare_mind.py \
   --news data/raw/mind/MINDsmall_train/news.tsv \
   --behaviors data/raw/mind/MINDsmall_train/behaviors.tsv \
   --output-dir data/processed/mind-small-train \
+  --max-candidates 50 \
   --include-prompts \
-  --seed 0
+  --seed 42
 ```
 
+The `K <= 50` boundary matches the inspected archived MaskPO evaluation rows.
 For a stable development subset, add `--sample-size N`.  To create a stable
 held-out partition within an input file, add `--validation-fraction F`.  The
 script emits `train.jsonl`, `validation.jsonl`, and `summary.json`.  All are
@@ -149,7 +154,8 @@ the canonical run:
 | learning rate | `1e-5` |
 | temperature / top-k / top-p | `0.6 / 20 / 0.95` |
 | maximum new tokens | `2048` for originals and probes |
-| effective original batch | `8` initially; profile before increasing to `16` |
+| distinct prompts per optimizer update | `8` initially; profile before increasing to `16` |
+| effective original rollouts per update | `32` initially; `64` at prompt batch `16` |
 
 Fields commented as reproducibility defaults were not recovered from the
 historical runtime.  Changing those fields creates a well-specified new run,
@@ -164,7 +170,8 @@ entry point reads the prepared JSONL and YAML configuration:
 python scripts/train_maskpo.py \
   --config configs/maskpo_qwen3_1p7b.yaml \
   --train-file data/processed/mind-small-train/train.jsonl \
-  --max-steps 1
+  --max-query-steps 1 \
+  --output-dir outputs/maskpo-smoke
 ```
 
 Then remove the smoke-test override and launch the recorded configuration:
@@ -175,7 +182,7 @@ python scripts/train_maskpo.py \
   --train-file data/processed/mind-small-train/train.jsonl
 ```
 
-For each query update, verify diagnostics show:
+For each logged prompt group, verify diagnostics show:
 
 - four originals sampled before the actor changes;
 - up to 16 one-body-masked probes sampled by the same pre-update policy;
