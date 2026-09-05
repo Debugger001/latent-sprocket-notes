@@ -1,0 +1,86 @@
+# Large-effective-batch stability pilot. Each optimizer update aggregates
+# 32 prompts x 4 sibling originals = 128 gradient-carrying rollouts, plus up to
+# 512 counterfactual suffix probes. The pilot is intentionally short so its
+# fixed-validation trend can be compared quickly with the batch-32 run.
+
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  adapter_path: artifacts/adapters/p2_rubric_reasoning_sft
+  dtype: bfloat16
+  trust_remote_code: false
+  device_map: auto
+  gradient_checkpointing: true
+
+data:
+  train_file: data/processed/mind-small-train-k20-24k-shuffled-seed42/train.jsonl
+  validation_file: data/processed/mind-small-train-k20-24k-shuffled-seed42/validation.jsonl
+  eval_file: data/processed/mind-small-dev-k20-10k-seed42/eval.jsonl
+  max_slate_size: 20
+
+generation:
+  num_siblings: 4
+  do_sample: true
+  temperature: 0.6
+  top_k: 20
+  top_p: 0.95
+  max_new_tokens: 2048
+  counterfactual_max_new_tokens: 2048
+  original_batch_size: 4
+  counterfactual_batch_size: 16
+
+maskpo:
+  num_rubrics: 4
+  masked_placeholder: "[MASKED_RUBRIC_CONTENT]"
+  counterfactual_boundary: synthesis_suffix_only
+  rank_metric: ndcg
+  lenient_integer_list_grading: true
+  positive_first_occurrence_only: true
+  format_max_reward: 0.1
+  rubric_delta_normalization: rms_no_centering
+  normalization_eps: 1.0e-8
+  tau_mask: 0.05
+  mask_clip: 2.0
+  lambda_rank: 1.0
+  lambda_mask: 0.5
+  invalid_probe_body_fallback: sequence
+
+optimization:
+  objective: tokenwise_bnpo
+  ppo_clip: 0.2
+  reference_kl_coefficient: 0.01
+  learning_rate: 5.0e-6
+  weight_decay: 0.0
+  effective_prompt_batch_size: 32
+  effective_original_batch_size: 128
+  gradient_accumulation_steps: 32
+  ppo_passes: 1
+  max_grad_norm: 1.0
+  # Thirty updates consume 960 distinct prompts and are enough for ten fixed
+  # validation measurements at approximately matched prompt cadence.
+  max_rollout_steps: 30
+  seed: 42
+
+validation:
+  enabled: true
+  rows: 200
+  # 3 x 128 = 384 originals between validations, close to the batch-32 run's
+  # 10 x 32 = 320 originals between validations.
+  interval_rollout_steps: 3
+  generation_batch_size: 16
+  max_new_tokens: 2048
+
+tracking:
+  wandb:
+    mode: online
+    project: maskpo-mind
+    entity: franknlp
+    name: maskpo-qwen3-1p7b-a100-b128-stability-pilot
+    group: maskpo-stability
+    tags: [mind, maskpo, qwen3-1.7b, p2-rubric-sft, a100, batch128, pilot]
+
+output:
+  directory: outputs/maskpo-qwen3-1.7b-a100-b128-pilot
+  log_query_steps: 1
+  checkpoint_rollout_steps: 3
+  keep_checkpoints: 3
