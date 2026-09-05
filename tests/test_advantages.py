@@ -16,30 +16,30 @@ from openbench_rerank_rl.advantages import (
 from openbench_rerank_rl.metrics import ndcg_at_k
 
 
-def test_sequence_advantages_z_normalize_six_siblings():
+def test_sequence_advantages_z_normalize_four_siblings():
     advantages = grpo_group_advantages(
-        [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
-        ["q"] * 6,
-        expected_group_size=6,
+        [0.0, 1.0, 2.0, 3.0],
+        ["q"] * 4,
+        expected_group_size=4,
     )
     assert sum(advantages) == pytest.approx(0.0, abs=1e-12)
-    assert sum(value * value for value in advantages) / 6 == pytest.approx(1.0)
+    assert sum(value * value for value in advantages) / 4 == pytest.approx(1.0)
     assert advantages == sorted(advantages)
 
 
 def test_sequence_advantages_are_query_local_and_zero_safe():
     advantages = grpo_group_advantages(
-        [1.0] * 6 + [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
-        ["flat"] * 6 + ["varied"] * 6,
-        expected_group_size=6,
+        [1.0] * 4 + [0.0, 1.0, 2.0, 3.0],
+        ["flat"] * 4 + ["varied"] * 4,
+        expected_group_size=4,
     )
-    assert advantages[:6] == [0.0] * 6
-    assert sum(advantages[6:]) == pytest.approx(0.0, abs=1e-12)
+    assert advantages[:4] == [0.0] * 4
+    assert sum(advantages[4:]) == pytest.approx(0.0, abs=1e-12)
 
 
-def test_sequence_advantages_can_enforce_six_siblings():
-    with pytest.raises(ValueError, match="six|6|sibling"):
-        grpo_group_advantages([1.0, 2.0], ["q", "q"], expected_group_size=6)
+def test_sequence_advantages_can_enforce_four_siblings():
+    with pytest.raises(ValueError, match="four|4|sibling"):
+        grpo_group_advantages([1.0, 2.0], ["q", "q"], expected_group_size=4)
 
 
 def test_rank_grpo_normalizes_each_answer_position_across_siblings():
@@ -48,18 +48,16 @@ def test_rank_grpo_normalizes_each_answer_position_across_siblings():
         [2, 1, 3],
         [2, 3, 1],
         [3, 2, 1],
-        [2, 3, 1],
-        [3, 2, 1],
     ]
     advantages = rank_grpo_position_advantages(
         orders,
-        [{1}] * 6,
-        ["q"] * 6,
+        [{1}] * 4,
+        ["q"] * 4,
         slate_k=3,
-        expected_group_size=6,
+        expected_group_size=4,
     )
-    assert advantages[0][0] == pytest.approx(math.sqrt(5))
-    assert all(row[0] == pytest.approx(-1 / math.sqrt(5)) for row in advantages[1:])
+    assert advantages[0][0] == pytest.approx(math.sqrt(3))
+    assert all(row[0] == pytest.approx(-1 / math.sqrt(3)) for row in advantages[1:])
     assert advantages[1][1] > 0.0
     assert advantages[0][1] < 0.0
 
@@ -70,15 +68,13 @@ def test_rank_grpo_duplicate_positive_does_not_get_second_credit():
         [2, 1, 3],
         [2, 3, 1],
         [3, 2, 1],
-        [2, 3, 1],
-        [3, 2, 1],
     ]
     advantages = rank_grpo_position_advantages(
         orders,
-        [{1}] * 6,
-        ["q"] * 6,
+        [{1}] * 4,
+        ["q"] * 4,
         slate_k=3,
-        expected_group_size=6,
+        expected_group_size=4,
     )
     # Rollout zero's repeated 1 has zero local utility at position two; only
     # rollout one's first appearance of 1 is positive in that bucket.
@@ -87,16 +83,16 @@ def test_rank_grpo_duplicate_positive_does_not_get_second_credit():
 
 
 def test_rank_grpo_preserves_archived_short_list_bucket_behavior():
-    orders = [[2]] + [[2, 1] for _ in range(5)]
+    orders = [[2]] + [[2, 1] for _ in range(3)]
     advantages = rank_grpo_position_advantages(
         orders,
-        [{1}] * 6,
-        ["q"] * 6,
+        [{1}] * 4,
+        ["q"] * 4,
         slate_k=2,
-        expected_group_size=6,
+        expected_group_size=4,
     )
     assert len(advantages[0]) == 1
-    # The five emitted position-two contributions are identical and therefore
+    # The three emitted position-two contributions are identical and therefore
     # normalize to zero; the short sibling is not inserted as a zero sample.
     assert all(row[1] == 0.0 for row in advantages[1:])
 
@@ -107,11 +103,9 @@ def test_rubric_deltas_use_one_signed_query_level_rms_without_centering():
         [0.0, 0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0],
     ]
     advantages = rubric_delta_advantages(deltas)
-    scale = math.sqrt(25.0 / 23.0)
+    scale = math.sqrt(25.0 / 15.0)
     assert advantages[0][0] == pytest.approx(3.0 / scale)
     assert advantages[0][1] == pytest.approx(-4.0 / scale)
     assert advantages[0][2] is None
@@ -121,23 +115,23 @@ def test_rubric_deltas_use_one_signed_query_level_rms_without_centering():
 
 
 def test_valid_zeros_participate_in_rubric_rms_and_invalids_do_not():
-    deltas = [[None, 0.1, 0.0, 0.0]] + [[0.0] * 4 for _ in range(5)]
+    deltas = [[None, 0.1, 0.0, 0.0]] + [[0.0] * 4 for _ in range(3)]
     advantages = rubric_delta_advantages(deltas)
     assert advantages[0][0] is None
-    assert advantages[0][1] == pytest.approx(math.sqrt(23.0))
+    assert advantages[0][1] == pytest.approx(math.sqrt(15.0))
     assert advantages[0][2] == 0.0
 
 
 def test_rubric_rms_explicit_validity_mask_excludes_values():
-    deltas = [[100.0, 1.0, 0.0, 0.0]] + [[0.0] * 4 for _ in range(5)]
-    valid = [[False, True, True, True]] + [[True] * 4 for _ in range(5)]
+    deltas = [[100.0, 1.0, 0.0, 0.0]] + [[0.0] * 4 for _ in range(3)]
+    valid = [[False, True, True, True]] + [[True] * 4 for _ in range(3)]
     advantages = rms_normalize_rubric_deltas(deltas, valid)
     assert advantages[0][0] is None
-    assert advantages[0][1] == pytest.approx(math.sqrt(23.0))
+    assert advantages[0][1] == pytest.approx(math.sqrt(15.0))
 
 
 def test_rubric_rms_is_zero_safe_and_preserves_invalid_entries():
-    deltas = [[None, 0.0, 0.0, 0.0]] + [[0.0] * 4 for _ in range(5)]
+    deltas = [[None, 0.0, 0.0, 0.0]] + [[0.0] * 4 for _ in range(3)]
     advantages = rubric_delta_advantages(deltas)
     assert advantages[0][0] is None
     assert all(

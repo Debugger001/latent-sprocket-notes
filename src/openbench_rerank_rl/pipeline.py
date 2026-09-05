@@ -65,7 +65,7 @@ class RolloutCredit:
 
 @dataclass(frozen=True)
 class QueryCredit:
-    """Credit-assignment result for one six-sibling query group."""
+    """Credit-assignment result for one sibling group."""
 
     positives: frozenset[int]
     slate_k: int

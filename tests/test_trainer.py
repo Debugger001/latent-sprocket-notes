@@ -67,12 +67,10 @@ class FakeBackend:
             "[2, 1, 3]",
             "[3, 2, 1]",
             "[1, 3, 2]",
-            "[2, 3, 1]",
-            "[3, 1, 2]",
         )
         for prefix in model_prefixes:
             if is_probe:
-                # Exactly one of the 24 suffixes is unparseable.  It remains a
+                # Exactly one of the 16 suffixes is unparseable.  It remains a
                 # scoring probe but is excluded from the delta/RMS matrix.
                 text = (
                     " no parseable answer"
@@ -81,7 +79,7 @@ class FakeBackend:
                 )
                 self._probe_index += 1
             else:
-                text = _completion(original_orders[self._original_index % 6])
+                text = _completion(original_orders[self._original_index % 4])
                 self._original_index += 1
             samples.append(_sample(text, prompt_marker=(len(prefix) % 200) + 1))
         return samples
@@ -128,7 +126,7 @@ def test_training_step_samples_all_probes_before_originals_only_loss():
         sampling_config=SamplingConfig(
             max_new_tokens=50,
             counterfactual_max_new_tokens=25,
-            original_batch_size=6,
+            original_batch_size=4,
             counterfactual_batch_size=4,
         ),
     )
@@ -142,17 +140,17 @@ def test_training_step_samples_all_probes_before_originals_only_loss():
         )
     )
 
-    assert actor.generated_sample_count == 30  # six originals plus 24 probes
+    assert actor.generated_sample_count == 20  # four originals plus 16 probes
     assert reference.generated_sample_count == 0
-    assert actor.logprob_sample_counts == [6, 6]
-    assert reference.logprob_sample_counts == [6]
-    assert result.query_credit.valid_probe_count == 23
+    assert actor.logprob_sample_counts == [4, 4]
+    assert reference.logprob_sample_counts == [4]
+    assert result.query_credit.valid_probe_count == 15
     assert result.active_token_count == sum(len(text) for text in result.originals)
     assert result.optimizer_stepped
     assert trainer.optimizer_steps == 1
     first_logps = next(index for index, event in enumerate(events) if event[0] == "logps")
     assert all(event[0] == "generate" for event in events[:first_logps])
-    assert sum(event[2] for event in events if event[0] == "generate") == 30
+    assert sum(event[2] for event in events if event[0] == "generate") == 20
     assert events[-1][0] == "optimizer_step"
     assert all(not route.used_sequence_fallback for route in result.routes)
 
@@ -187,7 +185,7 @@ def test_sampling_config_keeps_exact_generation_defaults():
     config = SamplingConfig()
     assert config.generation_kwargs() == {
         "do_sample": True,
-        "max_new_tokens": 1536,
+        "max_new_tokens": 2048,
         "use_cache": True,
         "temperature": 0.6,
         "top_k": 20,

@@ -22,7 +22,7 @@ generated checkpoints.
   first appearance.
 - A sequence reward `R_seq = R_rank + R_format`, where the format component is
   the mean of nine checks scaled to `[0, 0.1]`.
-- Six original sibling rollouts and four one-rubric counterfactual probes per
+- Four original sibling rollouts and four one-rubric counterfactual probes per
   structurally valid original.  A probe replaces exactly one rubric body with
   `[MASKED_RUBRIC_CONTENT]`, keeps the other three bodies fixed, and regenerates
   only the text after `**Synthesis:**`.

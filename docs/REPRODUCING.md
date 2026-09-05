@@ -137,7 +137,7 @@ the canonical run:
 
 | Setting | Canonical value |
 | --- | ---: |
-| original siblings | `6` |
+| original siblings | `4` |
 | rubric probes per structurally valid original | `4` |
 | rank reward | lenient nDCG |
 | format reward maximum | `0.1` |
@@ -146,7 +146,10 @@ the canonical run:
 | answer mask weight | `0.5` |
 | PPO clip | `0.2` |
 | reference-KL coefficient | `0.001` |
+| learning rate | `1e-5` |
 | temperature / top-k / top-p | `0.6 / 20 / 0.95` |
+| maximum new tokens | `2048` for originals and probes |
+| effective original batch | `8` initially; profile before increasing to `16` |
 
 Fields commented as reproducibility defaults were not recovered from the
 historical runtime.  Changing those fields creates a well-specified new run,
@@ -174,8 +177,8 @@ python scripts/train_maskpo.py \
 
 For each query update, verify diagnostics show:
 
-- six originals sampled before the actor changes;
-- up to 24 one-body-masked probes sampled by the same pre-update policy;
+- four originals sampled before the actor changes;
+- up to 16 one-body-masked probes sampled by the same pre-update policy;
 - invalid probes excluded, but valid zero deltas retained in the RMS scale;
 - probes absent from the loss token count;
 - nonzero rubric-region and answer-integer routing counts when parsing succeeds;

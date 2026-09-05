@@ -134,7 +134,9 @@ def _diagnostic_row(step: int, result: Any) -> dict[str, object]:
         "optimizer_step": result.optimizer_step,
         "optimizer_stepped": result.optimizer_stepped,
         "valid_counterfactuals": result.query_credit.valid_probe_count,
-        "counterfactual_slots": 24,
+        "counterfactual_slots": sum(
+            len(rollout.probes) for rollout in result.query_credit.rollouts
+        ),
         "rubric_rms_scale": result.query_credit.rubric_rms_scale,
         "routing_fallbacks": result.routing_fallback_count,
         "unavailable_rubric_bodies": sum(
@@ -199,7 +201,7 @@ def main() -> None:
 
     algorithm = MaskPOConfig(
         metric=str(maskpo.get("rank_metric", "ndcg")),
-        num_siblings=int(generation.get("num_siblings", 6)),
+        num_siblings=int(generation.get("num_siblings", 4)),
         num_rubrics=int(maskpo.get("num_rubrics", 4)),
         tau_mask=float(maskpo.get("tau_mask", 0.05)),
         mask_clip=float(maskpo.get("mask_clip", 2.0)),
@@ -213,9 +215,9 @@ def main() -> None:
         top_p=float(generation.get("top_p", 0.95)),
         max_new_tokens=int(generation.get("max_new_tokens", 2048)),
         counterfactual_max_new_tokens=int(
-            generation.get("counterfactual_max_new_tokens", 1024)
+            generation.get("counterfactual_max_new_tokens", 2048)
         ),
-        original_batch_size=int(generation.get("original_batch_size", 6)),
+        original_batch_size=int(generation.get("original_batch_size", 4)),
         counterfactual_batch_size=int(
             generation.get("counterfactual_batch_size", 4)
         ),
@@ -227,10 +229,23 @@ def main() -> None:
         if args.reference_device_map is not None
         else model.get("reference_device_map")
     )
+    accumulation_steps = int(optimization.get("gradient_accumulation_steps", 2))
+    effective_batch_size = int(
+        optimization.get(
+            "effective_original_batch_size",
+            algorithm.num_siblings * accumulation_steps,
+        )
+    )
+    if effective_batch_size != algorithm.num_siblings * accumulation_steps:
+        raise ValueError(
+            "effective_original_batch_size must equal num_siblings * "
+            "gradient_accumulation_steps"
+        )
+
     trainer = load_huggingface_maskpo_trainer(
         model_name_or_path=str(model["name_or_path"]),
         adapter_path=str(Path(str(model["adapter_path"])).expanduser().resolve()),
-        learning_rate=float(optimization.get("learning_rate", 1e-6)),
+        learning_rate=float(optimization.get("learning_rate", 1e-5)),
         weight_decay=float(optimization.get("weight_decay", 0.0)),
         dtype=str(model.get("dtype", "bfloat16")),
         trust_remote_code=bool(model.get("trust_remote_code", False)),
@@ -244,9 +259,7 @@ def main() -> None:
             optimization.get("reference_kl_coefficient", 0.001)
         ),
         normalization_epsilon=float(maskpo.get("normalization_eps", 1e-8)),
-        gradient_accumulation_steps=int(
-            optimization.get("gradient_accumulation_steps", 1)
-        ),
+        gradient_accumulation_steps=accumulation_steps,
         max_grad_norm=(
             None
             if optimization.get("max_grad_norm") is None
@@ -261,6 +274,9 @@ def main() -> None:
         "train_file": str(train_file),
         "seed": seed,
         "requested_steps": max_steps,
+        "num_siblings": algorithm.num_siblings,
+        "effective_original_batch_size": effective_batch_size,
+        "gradient_accumulation_steps": accumulation_steps,
         "torch": torch.__version__,
     }
     (output_dir / "run_metadata.json").write_text(

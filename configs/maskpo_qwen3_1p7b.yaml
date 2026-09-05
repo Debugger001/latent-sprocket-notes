@@ -15,17 +15,16 @@ data:
   train_file: data/processed/mind-small-train/train.jsonl
 
 generation:
-  num_siblings: 6
+  num_siblings: 4
   do_sample: true
   temperature: 0.6
   top_k: 20
   top_p: 0.95
-  # REPRODUCIBILITY DEFAULT: not recovered as a historical setting.
   max_new_tokens: 2048
-  # REPRODUCIBILITY DEFAULT: synthesis + answer only.
-  counterfactual_max_new_tokens: 1024
-  # REPRODUCIBILITY DEFAULTS: tune for available GPU memory.
-  original_batch_size: 6
+  counterfactual_max_new_tokens: 2048
+  # Generation microbatches. There are four originals and at most sixteen
+  # counterfactual suffixes per query.
+  original_batch_size: 4
   counterfactual_batch_size: 4
 
 maskpo:
@@ -49,16 +48,18 @@ optimization:
   objective: tokenwise_bnpo
   ppo_clip: 0.2
   reference_kl_coefficient: 0.001
-  # REPRODUCIBILITY DEFAULTS below: tune and record them for each new run.
-  learning_rate: 1.0e-6
+  learning_rate: 1.0e-5
   weight_decay: 0.0
-  gradient_accumulation_steps: 1
+  # Four sibling originals x two query microsteps = eight original rollouts
+  # per optimizer update. Set both values to 16 / 4 to stretch to batch 16.
+  effective_original_batch_size: 8
+  gradient_accumulation_steps: 2
   max_grad_norm: 1.0
   max_steps: 100
   seed: 42
 
 output:
   # REPRODUCIBILITY DEFAULTS: local artifacts remain ignored by Git.
-  dir: outputs/maskpo-qwen3-1.7b
+  directory: outputs/maskpo-qwen3-1.7b
   log_steps: 1
   save_steps: 25

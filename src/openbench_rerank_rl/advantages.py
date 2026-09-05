@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from .metrics import ideal_dcg
 
 
-DEFAULT_NUM_SIBLINGS = 6
+DEFAULT_NUM_SIBLINGS = 4
 DEFAULT_NUM_RUBRICS = 4
 
 
@@ -67,8 +67,8 @@ def grpo_group_advantages(
 ) -> list[float]:
     """Z-normalize sequence rewards within each prompt's sibling rollouts.
 
-    Latest MaskPO runs use six siblings; callers can set
-    ``expected_group_size=6`` to enforce that invariant.  The optional check is
+    The current MaskPO run uses four siblings; callers can set
+    ``expected_group_size=4`` to enforce that invariant.  The optional check is
     disabled by default to keep this low-level utility useful for small tests
     and ablations.
     """
@@ -249,7 +249,7 @@ def rubric_delta_advantages(
     expected_rubrics: int = DEFAULT_NUM_RUBRICS,
     eps: float = 1e-8,
 ) -> list[list[float | None]]:
-    """Latest MaskPO's query-level normalization for the valid 6x4 matrix."""
+    """MaskPO query-level normalization for the valid group-by-rubric matrix."""
 
     return rms_normalize_rubric_deltas(
         deltas,

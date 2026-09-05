@@ -74,14 +74,14 @@ R_format(y) = 0.1 * (1/9) * sum_{j=1}^{9} b_j
 R_seq(y) = R_rank(y) + R_format(y)
 ```
 
-For each query, sample exactly six sibling originals.  Sequence credit is the
-population z-score within those six:
+For each query, sample exactly four sibling originals.  Sequence credit is the
+population z-score within those four:
 
 ```text
 A_seq,i = (R_seq,i - mean_j R_seq,j) / (std_j R_seq,j + epsilon)
 ```
 
-When the within-group standard deviation is effectively zero, all six sequence
+When the within-group standard deviation is effectively zero, all four sequence
 advantages are zero.  `R_format` is included here once; it is never separately
 added to rubric or answer-item advantages.
 
@@ -97,7 +97,7 @@ assistant prefix that:
 4. ends immediately after the literal `**Synthesis:**` header.
 
 The same frozen policy generates only the new synthesis prose and final answer.
-Thus a complete group has at most `6 x 4 = 24` valid counterfactuals.  These
+Thus a complete group has at most `4 x 4 = 16` valid counterfactuals.  These
 suffixes are probes only and are excluded from the gradient batch.
 
 A probe is valid whenever the shared answer parser finds an integer list.  It
@@ -108,7 +108,7 @@ delta_{i,r} = R_rank(y_i) - R_rank(y_i,mask(r))
 ```
 
 Only ranking reward enters this delta.  Probe format is deliberately irrelevant
-to rubric causality.  Across every valid element `V_q` of one query's `6 x 4`
+to rubric causality.  Across every valid element `V_q` of one query's `4 x 4`
 matrix,
 
 ```text
@@ -126,7 +126,7 @@ zero.
 ## 4. Position and rank-shift credit
 
 Rank-GRPO first computes each emitted answer position's local nDCG contribution
-and z-normalizes contributions across the six siblings at the same position:
+and z-normalizes contributions across the four siblings at the same position:
 
 ```text
 A_rank,i,p = zscore_siblings(contribution(y_i[p], p))
@@ -210,13 +210,13 @@ L_BNPO = (1 / |T|) * sum_{t in T} (L_policy,t + 0.001 * KL_t)
 
 Old-policy log probabilities, reference log probabilities, routed advantages,
 and counterfactual generations are detached targets.  The actor is updated only
-after all six originals and their probes have been sampled and scored.
+after all four originals and their probes have been sampled and scored.
 
 ## 7. Constants for the latest run
 
 | Quantity | Value |
 | --- | ---: |
-| Sibling originals per query | `6` |
+| Sibling originals per query | `4` |
 | Rubrics per valid original | `4` |
 | Ranking metric | lenient binary nDCG |
 | Maximum format reward | `0.1` |
@@ -225,11 +225,14 @@ after all six originals and their probes have been sampled and scored.
 | Answer mask weight | `0.5` |
 | PPO ratio clip | `0.2` |
 | Reference-KL coefficient | `0.001` |
+| Learning rate | `1e-5` |
 | Sampling temperature | `0.6` |
 | Sampling top-k | `20` |
 | Sampling top-p | `0.95` |
+| Maximum new tokens, originals and probes | `2048` |
+| Effective originals per optimizer update | `8` initially (`16` after memory profiling) |
 
-Optimizer schedule, batch packing, maximum generation length, checkpoint
-cadence, and random seed were not recovered as historical facts.  Values for
-them in the checked-in configuration are explicitly labeled reproducibility
-defaults.
+These runtime hyperparameters specify the current new run; they are not claims
+about an unrecoverable historical optimizer configuration.  Batch 8 is formed
+by accumulating two four-original query groups.  Batch 16 requires four query
+groups per update and should be enabled only after the batch-8 memory profile.

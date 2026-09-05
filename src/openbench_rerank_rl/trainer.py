@@ -3,8 +3,8 @@
 The pure credit-assignment implementation lives in :mod:`pipeline` and
 :mod:`routing`.  This module is deliberately a thin runtime around it:
 
-1. sample six original completions from the unchanged actor;
-2. construct and sample up to twenty-four scoring-only counterfactual probes;
+1. sample four original completions from the unchanged actor;
+2. construct and sample up to sixteen scoring-only counterfactual probes;
 3. score and route advantages;
 4. compute old-policy and frozen-initial-SFT reference log probabilities; and
 5. update the actor with tokenwise clipped BNPO on originals only.
@@ -74,9 +74,9 @@ class SamplingConfig:
     temperature: float = 0.6
     top_k: int = 20
     top_p: float = 0.95
-    max_new_tokens: int = 1536
+    max_new_tokens: int = 2048
     counterfactual_max_new_tokens: int | None = None
-    original_batch_size: int = 6
+    original_batch_size: int = 4
     counterfactual_batch_size: int = 4
 
     def __post_init__(self) -> None:
@@ -222,8 +222,8 @@ class MaskPOTrainer:
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float | None = 1.0,
     ) -> None:
-        if maskpo_config.num_siblings != 6:
-            raise ValueError("latest MaskPO requires exactly six sibling rollouts")
+        if maskpo_config.num_siblings != 4:
+            raise ValueError("the configured MaskPO run requires exactly four sibling rollouts")
         if maskpo_config.num_rubrics != 4:
             raise ValueError("latest MaskPO requires exactly four rubrics")
         if maskpo_config.metric != "ndcg":
@@ -725,7 +725,7 @@ def load_huggingface_maskpo_trainer(
     *,
     model_name_or_path: str,
     adapter_path: str,
-    learning_rate: float = 1e-6,
+    learning_rate: float = 1e-5,
     weight_decay: float = 0.0,
     dtype: str = "bfloat16",
     trust_remote_code: bool = False,

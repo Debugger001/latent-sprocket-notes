@@ -41,9 +41,7 @@ def test_group_scoring_uses_ranking_only_for_probe_delta_and_excludes_invalid():
     originals = [
         completion("[1, 2, 3]"),
         completion("[2, 1, 3]"),
-        completion("[3, 2, 1]"),
         completion("[1, 1, 99]"),
-        completion("[2, 3, 1]"),
         "malformed response [3, 1, 2]",
     ]
     probes: list[list[str | None]] = []
@@ -72,37 +70,37 @@ def test_group_scoring_uses_ranking_only_for_probe_delta_and_excludes_invalid():
         slate_k=3,
     )
 
-    assert len(result.rollouts) == 6
-    assert result.valid_probe_count == 15
+    assert len(result.rollouts) == 4
+    assert result.valid_probe_count == 9
     assert result.rollouts[0].probes[0].valid
     assert result.rollouts[0].probes[0].delta == pytest.approx(0.0)
     assert result.rollouts[0].probes[2].delta is None
     assert result.rollouts[0].rubric_advantages[2] is None
     assert result.rollouts[0].format_reward == pytest.approx(0.1)
-    assert result.rollouts[5].answer_parseable
-    assert result.rollouts[5].format_reward < 0.1
+    assert result.rollouts[3].answer_parseable
+    assert result.rollouts[3].format_reward < 0.1
     assert sum(item.sequence_advantage for item in result.rollouts) == pytest.approx(
         0.0, abs=1e-7
     )
 
 
 def test_group_scoring_rejects_probe_for_unmaskable_original():
-    originals = [completion("[1, 2]")] * 5 + ["plain answer [1, 2]"]
-    probes = [[completion("[1, 2]")] * 4 for _ in range(6)]
+    originals = [completion("[1, 2]")] * 3 + ["plain answer [1, 2]"]
+    probes = [[completion("[1, 2]")] * 4 for _ in range(4)]
     with pytest.raises(ValueError, match="not safely maskable"):
         score_maskpo_group(originals, probes, positives={1}, slate_k=2)
 
 
 def test_valid_zero_probe_participates_and_gets_zero_rubric_advantage():
-    originals = [completion("[1, 2]")] * 6
-    probes = [[completion("[1, 2]")] * 4 for _ in range(6)]
+    originals = [completion("[1, 2]")] * 4
+    probes = [[completion("[1, 2]")] * 4 for _ in range(4)]
     result = score_maskpo_group(
         originals,
         probes,
         positives={1},
         slate_k=2,
     )
-    assert result.valid_probe_count == 24
+    assert result.valid_probe_count == 16
     assert result.rubric_rms_scale == 0.0
     assert all(
         advantage == 0.0
