@@ -75,9 +75,9 @@ tracking:
     mode: online
     project: maskpo-mind
     entity: franknlp
-    name: maskpo-qwen3-1p7b-a100-b128-stability-pilot
+    name: maskpo-qwen3-1p7b-b128-faststable-a100-a6000-pilot
     group: maskpo-stability
-    tags: [mind, maskpo, qwen3-1.7b, p2-rubric-sft, a100, batch128, pilot]
+    tags: [mind, maskpo, qwen3-1.7b, p2-rubric-sft, a100-actor, a6000-reference, batch128, pilot]
 
 output:
   directory: outputs/maskpo-qwen3-1.7b-a100-b128-pilot

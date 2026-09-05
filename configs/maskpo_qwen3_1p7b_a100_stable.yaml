@@ -72,9 +72,9 @@ tracking:
     mode: online
     project: maskpo-mind
     entity: franknlp
-    name: maskpo-qwen3-1p7b-a100-stable-lr5e6-kl1e2-p1
+    name: maskpo-qwen3-1p7b-b32-faststable-a100-a6000
     group: maskpo-stability
-    tags: [mind, maskpo, qwen3-1.7b, p2-rubric-sft, a100, stability]
+    tags: [mind, maskpo, qwen3-1.7b, p2-rubric-sft, a100-actor, a6000-reference, batch32, stability]
 
 output:
   directory: outputs/maskpo-qwen3-1.7b-a100-stable
