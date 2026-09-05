@@ -56,17 +56,15 @@ optimization:
   gradient_accumulation_steps: 32
   ppo_passes: 1
   max_grad_norm: 1.0
-  # Thirty updates consume 960 distinct prompts and are enough for ten fixed
-  # validation measurements at approximately matched prompt cadence.
+  # Thirty updates consume 960 distinct prompts and provide three fixed
+  # validation measurements after the required step-10 cadence.
   max_rollout_steps: 30
   seed: 42
 
 validation:
   enabled: true
   rows: 200
-  # 3 x 128 = 384 originals between validations, close to the batch-32 run's
-  # 10 x 32 = 320 originals between validations.
-  interval_rollout_steps: 3
+  interval_rollout_steps: 10
   generation_batch_size: 16
   max_new_tokens: 2048
 
