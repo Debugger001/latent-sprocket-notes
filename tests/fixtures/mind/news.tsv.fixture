@@ -1,0 +1,5 @@
+N1	news	politics	First political story	First abstract	https://example.test/1	[{"Label":"Person A"}]	[]
+N2	sports	basketball_nba	Second sports story	Second abstract	https://example.test/2	[]	[{"Label":"Team B"}]
+N3	foodanddrink	recipes	Third recipe story	Third abstract	https://example.test/3	[]	[]
+N4	finance	markets	Fourth market story	Fourth abstract	https://example.test/4	[]	[]
+N5	weather	weathertopstories	Fifth weather story	Fifth abstract	https://example.test/5	[]	[]

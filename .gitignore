@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Secrets and credentials
+.env
+.env.*
+*.key
+*.pem
+credentials*.json
+service-account*.json
+.netrc
+.secrets/
+secrets/
+auth_token*
+hf_token*
+token.txt
+
+# Raw/derived MIND data and local model material are never committed.
+data/
+datasets/
+artifacts/
+models/
+checkpoints/
+outputs/
+runs/
+wandb/
+comet/
+*.jsonl
+*.parquet
+*.csv
+*.tsv
+*.sqlite
+*.db
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.pkl
+
+# Small synthetic fixtures are safe to version explicitly.
+!tests/fixtures/**/*.jsonl
+!tests/fixtures/**/*.csv
+!tests/fixtures/**/*.tsv
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/

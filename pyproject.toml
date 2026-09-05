@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openbench-rerank-rl"
+version = "0.2.0"
+description = "MaskPO credit assignment for fixed-slate reranking on public MIND data"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+data = ["huggingface-hub>=0.33"]
+training = [
+  "accelerate>=1.8,<2",
+  "peft>=0.16,<1",
+  "PyYAML>=6.0",
+  "torch>=2.6,<3",
+  "transformers>=4.52,<5",
+]
+dev = ["PyYAML>=6.0", "pytest>=8.0"]
+
+[project.urls]
+Repository = "https://github.com/Debugger001/latent-sprocket-notes"
+Dataset = "https://msnews.github.io/"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

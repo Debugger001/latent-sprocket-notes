@@ -1,0 +1,64 @@
+# Canonical latest MaskPO decisions recovered from the public handoff and the
+# final design notes.  Fields explicitly marked REPRODUCIBILITY DEFAULT were
+# not preserved as historical run settings.
+
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  adapter_path: artifacts/adapters/p2_rubric_reasoning_sft
+  dtype: bfloat16
+  trust_remote_code: false
+  device_map: auto
+  gradient_checkpointing: true
+
+data:
+  # Supply --train-file on the CLI or replace this local, gitignored path.
+  train_file: data/processed/mind-small-train/train.jsonl
+
+generation:
+  num_siblings: 6
+  do_sample: true
+  temperature: 0.6
+  top_k: 20
+  top_p: 0.95
+  # REPRODUCIBILITY DEFAULT: not recovered as a historical setting.
+  max_new_tokens: 2048
+  # REPRODUCIBILITY DEFAULT: synthesis + answer only.
+  counterfactual_max_new_tokens: 1024
+  # REPRODUCIBILITY DEFAULTS: tune for available GPU memory.
+  original_batch_size: 6
+  counterfactual_batch_size: 4
+
+maskpo:
+  num_rubrics: 4
+  masked_placeholder: "[MASKED_RUBRIC_CONTENT]"
+  counterfactual_boundary: synthesis_suffix_only
+  rank_metric: ndcg
+  lenient_integer_list_grading: true
+  positive_first_occurrence_only: true
+  format_max_reward: 0.1
+  rubric_delta_normalization: rms_no_centering
+  normalization_eps: 1.0e-8
+  tau_mask: 0.05
+  mask_clip: 2.0
+  lambda_rank: 1.0
+  lambda_mask: 0.5
+  # Explicit default for the undefined advantage of an invalid single probe.
+  invalid_probe_body_fallback: sequence
+
+optimization:
+  objective: tokenwise_bnpo
+  ppo_clip: 0.2
+  reference_kl_coefficient: 0.001
+  # REPRODUCIBILITY DEFAULTS below: tune and record them for each new run.
+  learning_rate: 1.0e-6
+  weight_decay: 0.0
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  max_steps: 100
+  seed: 42
+
+output:
+  # REPRODUCIBILITY DEFAULTS: local artifacts remain ignored by Git.
+  dir: outputs/maskpo-qwen3-1.7b
+  log_steps: 1
+  save_steps: 25
