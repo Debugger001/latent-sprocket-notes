@@ -25,9 +25,13 @@ python -m pip install -e '.[data,training,dev]'
 pytest
 ```
 
-The archived environment used Python 3.10, PyTorch 2.6, Transformers 4.52,
-Accelerate 1.8, and PEFT 0.16.  The dependency ranges in `pyproject.toml` retain
-that compatible family while allowing patch releases.
+The UCLA environment inspected during this rebuild has Python 3.10,
+PyTorch 2.6, Transformers 4.52, Accelerate 1.8, and PEFT 0.16.  These are not
+claimed as the exact historical training versions: the archived adapter's
+model configuration records Transformers 4.57.6, while its generation
+configuration records 4.51.0.  The dependency ranges in `pyproject.toml`
+cover that compatible family rather than asserting an unrecoverable exact
+environment.
 
 ## 2. Recover the Phase-2 rubric adapter
 
