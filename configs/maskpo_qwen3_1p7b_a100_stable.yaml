@@ -1,0 +1,83 @@
+# A100 stability restart after the canonical 1e-5 / two-pass run showed
+# increasing completion length, reference KL, and fixed-validation regression.
+# This run starts again from the original phase-2 rubric-reasoning SFT adapter.
+
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  adapter_path: artifacts/adapters/p2_rubric_reasoning_sft
+  dtype: bfloat16
+  trust_remote_code: false
+  device_map: auto
+  gradient_checkpointing: true
+
+data:
+  train_file: data/processed/mind-small-train-k20-24k-shuffled-seed42/train.jsonl
+  validation_file: data/processed/mind-small-train-k20-24k-shuffled-seed42/validation.jsonl
+  eval_file: data/processed/mind-small-dev-k20-10k-seed42/eval.jsonl
+  max_slate_size: 20
+
+generation:
+  num_siblings: 4
+  do_sample: true
+  temperature: 0.6
+  top_k: 20
+  top_p: 0.95
+  max_new_tokens: 2048
+  counterfactual_max_new_tokens: 2048
+  original_batch_size: 4
+  counterfactual_batch_size: 16
+
+maskpo:
+  num_rubrics: 4
+  masked_placeholder: "[MASKED_RUBRIC_CONTENT]"
+  counterfactual_boundary: synthesis_suffix_only
+  rank_metric: ndcg
+  lenient_integer_list_grading: true
+  positive_first_occurrence_only: true
+  format_max_reward: 0.1
+  rubric_delta_normalization: rms_no_centering
+  normalization_eps: 1.0e-8
+  tau_mask: 0.05
+  mask_clip: 2.0
+  lambda_rank: 1.0
+  lambda_mask: 0.5
+  invalid_probe_body_fallback: sequence
+
+optimization:
+  objective: tokenwise_bnpo
+  ppo_clip: 0.2
+  # Stronger anchoring and one update per fresh rollout are the only algorithmic
+  # changes in this stability run; token routing and rewards remain canonical.
+  reference_kl_coefficient: 0.01
+  learning_rate: 5.0e-6
+  weight_decay: 0.0
+  effective_prompt_batch_size: 8
+  effective_original_batch_size: 32
+  gradient_accumulation_steps: 8
+  ppo_passes: 1
+  max_grad_norm: 1.0
+  max_rollout_steps: 3000
+  seed: 42
+
+validation:
+  enabled: true
+  rows: 200
+  interval_rollout_steps: 10
+  generation_batch_size: 16
+  max_new_tokens: 2048
+
+tracking:
+  wandb:
+    mode: online
+    project: maskpo-mind
+    entity: franknlp
+    name: maskpo-qwen3-1p7b-a100-stable-lr5e6-kl1e2-p1
+    group: maskpo-stability
+    tags: [mind, maskpo, qwen3-1.7b, p2-rubric-sft, a100, stability]
+
+output:
+  directory: outputs/maskpo-qwen3-1.7b-a100-stable
+  log_query_steps: 1
+  checkpoint_rollout_steps: 5
+  keep_checkpoints: 2
