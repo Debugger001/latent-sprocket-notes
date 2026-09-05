@@ -32,9 +32,14 @@ generated checkpoints.
   Rank-GRPO credit, rank-shift residuals, semantic token routing, and a safe
   sequence-advantage fallback.
 - Tokenwise clipped BNPO with PPO clip `0.2` and reference-KL coefficient
-  `0.001`. Eight distinct prompts (32 originals) are accumulated per optimizer
-  update and normalized once over all active original tokens. Counterfactual
-  suffixes are scoring probes and receive no gradient.
+  `0.001`. Eight distinct prompts (32 originals) are accumulated into each fresh
+  rollout batch and normalized once over all active original tokens.
+  Counterfactual suffixes are scoring probes and receive no gradient.
+- Two PPO passes over each fresh rollout batch, for 3,000 rollout steps / 24,000
+  distinct training prompts / 6,000 optimizer updates in the canonical run.
+- Greedy validation on one fixed 200-row `K <= 20` holdout at baseline and every
+  10 rollout steps, with nDCG, format reward, parse rate, and exact-permutation
+  rate streamed to W&B alongside scalar training and checkpoint metrics.
 
 The precise equations and edge-case rules are in
 [docs/ALGORITHMS.md](docs/ALGORITHMS.md).
@@ -54,7 +59,7 @@ pytest
 For MIND download helpers and model training dependencies:
 
 ```bash
-python -m pip install -e '.[data,training,dev]'
+python -m pip install -e '.[data,training,tracking,dev]'
 ```
 
 Import the Phase-2 rubric adapter from the original audit-copy ZIP.  The script
@@ -79,9 +84,29 @@ Turn a local MIND split into deterministic, prompt-ready JSONL:
 python scripts/prepare_mind.py \
   --news data/raw/mind/MINDsmall_train/news.tsv \
   --behaviors data/raw/mind/MINDsmall_train/behaviors.tsv \
-  --output-dir data/processed/mind-small \
-  --include-prompts
+  --output-dir data/processed/mind-small-train-k20-24k-shuffled-seed42 \
+  --max-candidates 20 \
+  --sample-size 24200 \
+  --validation-fraction 0.008264462809917356 \
+  --shuffle-training \
+  --include-prompts \
+  --seed 42
 ```
+
+This materializes 24,000 training rows and the fixed 200-row validation set.
+The separate MIND-small dev materialization used for final evaluation is
+recorded at `data/processed/mind-small-dev-k20-10k-seed42/eval.jsonl`.
+
+The canonical configuration streams only explicitly whitelisted scalar metrics
+to the `changliu11/maskpo-mind` W&B project. Authenticate on the training host
+with `wandb login`; never place an API key in YAML or a command-line argument.
+Prompts, completions, example IDs, full local paths, source code, and model
+checkpoints are not uploaded by this runtime.
+
+Crash-safe checkpoints are published every five complete eight-prompt rollout
+steps and the newest two are retained. Resume in the same output directory with
+`--resume-from-checkpoint latest`; input, adapter, model-revision, source, and
+GPU-routing fingerprints are checked before any saved state is restored.
 
 Score generated JSONL rows containing `completion`, `positive_indices`, and
 `k` with exactly the same lenient grader used during training:

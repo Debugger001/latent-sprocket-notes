@@ -21,7 +21,7 @@ cd latent-sprocket-notes
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e '.[data,training,dev]'
+python -m pip install -e '.[data,training,tracking,dev]'
 pytest
 ```
 
@@ -115,16 +115,21 @@ least one positive and adds the current prompt to the generated JSONL:
 python scripts/prepare_mind.py \
   --news data/raw/mind/MINDsmall_train/news.tsv \
   --behaviors data/raw/mind/MINDsmall_train/behaviors.tsv \
-  --output-dir data/processed/mind-small-train-k20-800-seed42 \
+  --output-dir data/processed/mind-small-train-k20-24k-shuffled-seed42 \
   --max-candidates 20 \
-  --sample-size 800 \
+  --sample-size 24200 \
+  --validation-fraction 0.008264462809917356 \
+  --shuffle-training \
   --include-prompts \
   --seed 42
 ```
 
-The RL stage deliberately uses `K <= 20`, where the policy can produce exact
-permutations substantially more reliably. Evaluation may still report broader
-slate slices, but those rows are not included in this RL training set.
+This exact deterministic split produces 24,000 training rows and 200 held-out
+validation rows. The RL stage deliberately uses `K <= 20`, where the policy can
+produce exact permutations substantially more reliably. Evaluation may still
+report broader slate slices, but those rows are not included in this RL training
+set. Materialize the separate MIND-small dev evaluation set at
+`data/processed/mind-small-dev-k20-10k-seed42/eval.jsonl`.
 For a different stable development subset, change `--sample-size N`. To create
 a stable held-out partition within an input file, add `--validation-fraction F`.
 The script emits `train.jsonl`, `validation.jsonl`, and `summary.json`. All are
@@ -164,8 +169,13 @@ the canonical run:
 | learning rate | `1e-5` |
 | temperature / top-k / top-p | `0.6 / 20 / 0.95` |
 | maximum new tokens | `2048` for originals and probes |
-| distinct prompts per optimizer update | `8` initially; profile before increasing to `16` |
-| effective original rollouts per update | `32` initially; `64` at prompt batch `16` |
+| base-model revision | `70d244cc86ccca08cf5af4e1e306ecf908b1ad5e` |
+| generation microbatches | `4` originals; up to `16` counterfactual suffixes; `16` validation prompts |
+| distinct prompts per fresh rollout batch | `8` initially; profile before increasing to `16` |
+| original rollouts per fresh batch | `32` initially; `64` at prompt batch `16` |
+| PPO passes per fresh rollout batch | `2` |
+| fresh rollout steps | `3,000` (`24,000` distinct prompts, `6,000` updates) |
+| online validation | fixed 200 rows, baseline and every 10 rollout steps |
 
 Fields commented as reproducibility defaults were not recovered from the
 historical runtime.  Changing those fields creates a well-specified new run,
@@ -177,20 +187,78 @@ Run a short, one-query smoke test before scheduling a full job.  The training
 entry point reads the prepared JSONL and YAML configuration:
 
 ```bash
-python scripts/train_maskpo.py \
+CUDA_VISIBLE_DEVICES=0,1 python scripts/train_maskpo.py \
   --config configs/maskpo_qwen3_1p7b.yaml \
-  --train-file data/processed/mind-small-train-k20-800-seed42/train.jsonl \
+  --train-file data/processed/mind-small-train-k20-24k-shuffled-seed42/train.jsonl \
   --max-query-steps 1 \
+  --skip-validation \
+  --wandb-mode disabled \
+  --device-map cuda:0 \
+  --reference-device-map cuda:1 \
   --output-dir outputs/maskpo-smoke
 ```
 
 Then remove the smoke-test override and launch the recorded configuration:
 
 ```bash
-python scripts/train_maskpo.py \
+CUDA_VISIBLE_DEVICES=0,1 python scripts/train_maskpo.py \
   --config configs/my_maskpo_run.yaml \
-  --train-file data/processed/mind-small-train-k20-800-seed42/train.jsonl
+  --train-file data/processed/mind-small-train-k20-24k-shuffled-seed42/train.jsonl \
+  --device-map cuda:0 \
+  --reference-device-map cuda:1
 ```
+
+Before the canonical run, install the optional tracking dependency and
+authenticate interactively on the GPU host:
+
+```bash
+python -m pip install -e '.[data,training,tracking,dev]'
+wandb login
+```
+
+The checked-in run uses W&B online mode in project `changliu11/maskpo-mind`.
+Only a whitelisted set of hyperparameters and scalar train, validation,
+progress, and checkpoint-event metrics is sent. API credentials, prompts,
+completions, example IDs, full filesystem paths, source code, and checkpoint
+weights are not logged or uploaded. A single W&B history row is committed per
+completed rollout step so train and due validation metrics share the same
+unambiguous x-axis value.
+
+The baseline greedy validation pass runs before training. It then repeats after
+rollout steps 10, 20, and so on over the same fixed 200 rows, generating exactly
+one completion per prompt with sampling disabled. Each completion is scored by
+the same lenient nDCG and nine-check format grader used by policy rollouts.
+
+The trainer publishes a crash-safe checkpoint every five completed rollout
+steps and keeps the newest two under `OUTPUT/checkpoints/`. A checkpoint is
+written only after all eight fresh prompts and both PPO passes have completed;
+partial accumulation windows are never resumable checkpoints. Resume the newest
+complete checkpoint in place with:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python scripts/train_maskpo.py \
+  --config configs/my_maskpo_run.yaml \
+  --output-dir outputs/maskpo-qwen3-1p7b \
+  --device-map cuda:0 \
+  --reference-device-map cuda:1 \
+  --resume-from-checkpoint latest
+```
+
+Use the scheduler-assigned device identifiers on another host. The visible
+device list and both logical mappings must be repeated exactly on resume; a
+mismatch is rejected before saved state is loaded.
+
+An explicit path to the newest versioned checkpoint may replace `latest`.
+Older retained checkpoints are intentionally rejected to avoid colliding with
+later checkpoint history in the same output directory. Resume verifies the
+config, ordered train and validation inputs, original Phase-2 adapter, pinned
+base-model revision, training source, actor/reference device maps, and visible
+CUDA-device ordering before loading the actor, optimizer, counters, and
+random-number-generator states. It also verifies the exact last
+example ID and truncates only uncheckpointed tails from the two run JSONL logs.
+The frozen KL reference is always reloaded from the original Phase-2 adapter.
+Baseline validation is not repeated, and W&B starts a new linked run whose URL
+and ID are recorded in `wandb_run.json`.
 
 For each logged prompt group, verify diagnostics show:
 
@@ -233,7 +301,7 @@ cd latent-sprocket-notes
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e '.[data,training,dev]'
+python -m pip install -e '.[data,training,tracking,dev]'
 pytest
 ```
 

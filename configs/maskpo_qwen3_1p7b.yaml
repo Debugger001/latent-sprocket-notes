@@ -4,6 +4,8 @@
 
 model:
   name_or_path: Qwen/Qwen3-1.7B
+  # Pin the exact public base-model snapshot used by both actor and reference.
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
   adapter_path: artifacts/adapters/p2_rubric_reasoning_sft
   dtype: bfloat16
   trust_remote_code: false
@@ -12,7 +14,9 @@ model:
 
 data:
   # Supply --train-file on the CLI or replace this local, gitignored path.
-  train_file: data/processed/mind-small-train-k20-800-seed42/train.jsonl
+  train_file: data/processed/mind-small-train-k20-24k-shuffled-seed42/train.jsonl
+  validation_file: data/processed/mind-small-train-k20-24k-shuffled-seed42/validation.jsonl
+  eval_file: data/processed/mind-small-dev-k20-10k-seed42/eval.jsonl
   # RL is intentionally limited to slates the policy can reliably permute.
   max_slate_size: 20
 
@@ -27,7 +31,7 @@ generation:
   # Generation microbatches. There are four originals and at most sixteen
   # counterfactual suffixes per query.
   original_batch_size: 4
-  counterfactual_batch_size: 4
+  counterfactual_batch_size: 16
 
 maskpo:
   num_rubrics: 4
@@ -58,13 +62,36 @@ optimization:
   effective_prompt_batch_size: 8
   effective_original_batch_size: 32
   gradient_accumulation_steps: 8
+  # Reuse each fresh 8-prompt rollout batch for two clipped PPO passes.
+  ppo_passes: 2
   max_grad_norm: 1.0
-  # Optimizer updates, not prompt-level microsteps.
-  max_optimizer_steps: 100
+  # 3,000 rollout batches x 8 prompts = 24,000 distinct prompts. Two PPO
+  # passes produce 6,000 optimizer updates without regenerating rollouts.
+  max_rollout_steps: 3000
   seed: 42
+
+validation:
+  enabled: true
+  rows: 200
+  interval_rollout_steps: 10
+  generation_batch_size: 16
+  max_new_tokens: 2048
+
+tracking:
+  wandb:
+    # The canonical full run streams scalar metrics online. Use the CLI
+    # --wandb-mode disabled override only for a local smoke test.
+    mode: online
+    project: maskpo-mind
+    entity: changliu11
+    name: maskpo-qwen3-1p7b-p2-rubric-sft
+    group: canonical-maskpo
+    tags: [mind, maskpo, qwen3-1.7b, p2-rubric-sft]
 
 output:
   # REPRODUCIBILITY DEFAULTS: local artifacts remain ignored by Git.
   directory: outputs/maskpo-qwen3-1.7b
   log_query_steps: 1
-  save_optimizer_steps: 25
+  # Publish only complete 8-prompt/two-pass checkpoints, retaining the newest two.
+  checkpoint_rollout_steps: 5
+  keep_checkpoints: 2

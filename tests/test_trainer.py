@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Sequence
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -14,9 +15,11 @@ from openbench_rerank_rl.trainer import (
     HuggingFacePolicyBackend,
     LogProbBatch,
     MaskPOTrainer,
+    PPOPassMetrics,
     SamplingConfig,
     TrainingExample,
     _targets_with_serialized_lora_weights,
+    load_huggingface_maskpo_trainer,
 )
 
 
@@ -214,6 +217,7 @@ def test_training_step_samples_all_probes_before_originals_only_loss():
             original_batch_size=4,
             counterfactual_batch_size=4,
         ),
+        ppo_passes=1,
     )
 
     result = trainer.train_query(
@@ -249,6 +253,7 @@ def test_gradient_accumulation_flushes_partial_window():
         reference=reference,
         optimizer=RecordingSGD(actor.trainable_parameters(), events),
         gradient_accumulation_steps=2,
+        ppo_passes=1,
         max_grad_norm=None,
     )
     result = trainer.train_query(
@@ -258,6 +263,7 @@ def test_gradient_accumulation_flushes_partial_window():
     assert trainer.pending_micro_steps == 1
     assert trainer.flush_gradients()
     assert trainer.optimizer_steps == 1
+    assert trainer.rollout_steps == 1
     assert not trainer.flush_gradients()
 
 
@@ -270,6 +276,7 @@ def test_gradient_accumulation_normalizes_once_over_all_active_tokens(monkeypatc
         reference=reference,
         optimizer=RecordingSGD(actor.trainable_parameters(), events),
         gradient_accumulation_steps=2,
+        ppo_passes=1,
         max_grad_norm=None,
     )
     monkeypatch.setattr(
@@ -296,6 +303,7 @@ def test_partial_accumulation_uses_its_actual_active_token_count(monkeypatch):
         reference=reference,
         optimizer=RecordingSGD(actor.trainable_parameters(), events),
         gradient_accumulation_steps=4,
+        ppo_passes=1,
         max_grad_norm=None,
     )
     monkeypatch.setattr(
@@ -320,6 +328,7 @@ def test_single_micro_step_preserves_mean_loss_gradient(monkeypatch):
         reference=reference,
         optimizer=RecordingSGD(actor.trainable_parameters(), events),
         gradient_accumulation_steps=1,
+        ppo_passes=1,
         max_grad_norm=None,
     )
     monkeypatch.setattr(
@@ -331,6 +340,494 @@ def test_single_micro_step_preserves_mean_loss_gradient(monkeypatch):
 
     assert result.optimizer_stepped
     assert actor.parameter.item() == pytest.approx(-0.0175)
+
+
+def test_two_ppo_passes_replay_one_rollout_step_against_fixed_old_policy(
+    monkeypatch,
+):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=2,
+        ppo_passes=2,
+        max_grad_norm=None,
+    )
+    seen_logps: list[tuple[float, float]] = []
+
+    def recording_loss(current_logps, old_logps, *_args, **_kwargs):
+        seen_logps.append(
+            (float(current_logps[0, 0].detach()), float(old_logps[0, 0]))
+        )
+        mean = current_logps[0, 0]
+        zero = mean.detach() * 0.0
+        return BNPOLossOutput(
+            loss=mean,
+            policy_loss=mean,
+            kl=zero,
+            clip_fraction=zero,
+            token_count=torch.tensor(1, device=current_logps.device),
+        )
+
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss", recording_loss
+    )
+
+    first = trainer.train_query(TrainingExample("prompt-1", frozenset({1}), 3))
+    second = trainer.train_query(TrainingExample("prompt-2", frozenset({1}), 3))
+
+    assert not first.rollout_step_completed
+    assert first.optimizer_steps_applied == 0
+    assert second.rollout_step_completed
+    assert second.optimizer_steps_applied == 2
+    assert second.rollout_step == 1
+    assert second.optimizer_step == 2
+    assert trainer.rollout_steps == 1
+    assert trainer.optimizer_steps == 2
+    assert actor.generated_sample_count == 40
+    assert reference.logprob_sample_counts == [4, 4]
+    assert actor.logprob_sample_counts == [4, 4, 4, 4, 4, 4]
+
+    # Both prompt groups were sampled before the first update. The replayed
+    # pass sees the updated actor while retaining log-probabilities from the
+    # unchanged behavior policy.
+    first_optimizer_event = events.index(("optimizer_step",))
+    assert sum(
+        event[2] for event in events[:first_optimizer_event] if event[0] == "generate"
+    ) == 40
+    assert seen_logps[:2] == [(0.0, 0.0), (0.0, 0.0)]
+    assert [old for _current, old in seen_logps[2:]] == [0.0, 0.0]
+    assert [current for current, _old in seen_logps[2:]] == pytest.approx(
+        [-0.01, -0.01]
+    )
+    assert actor.parameter.item() == pytest.approx(-0.02)
+
+
+def test_completed_rollout_exposes_token_weighted_metrics_for_every_pass(
+    monkeypatch,
+):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=2,
+        ppo_passes=2,
+        max_grad_norm=None,
+    )
+    specs = iter(
+        [
+            (2, 1.0, 2.0, 3.0, 0.1),
+            (8, 11.0, 12.0, 13.0, 0.6),
+            (2, 21.0, 22.0, 23.0, 0.2),
+            (8, 31.0, 32.0, 33.0, 0.7),
+        ]
+    )
+
+    def metric_loss(current_logps, *_args, **_kwargs):
+        token_count, loss_value, policy_loss, kl, clip_fraction = next(specs)
+        differentiable = current_logps[0, 0]
+        loss = differentiable + (loss_value - float(differentiable.detach()))
+        return BNPOLossOutput(
+            loss=loss,
+            policy_loss=differentiable.detach().new_tensor(policy_loss),
+            kl=differentiable.detach().new_tensor(kl),
+            clip_fraction=differentiable.detach().new_tensor(clip_fraction),
+            token_count=torch.tensor(token_count, device=current_logps.device),
+        )
+
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss", metric_loss
+    )
+
+    first = trainer.train_query(TrainingExample("prompt-1", frozenset({1}), 3))
+    completed = trainer.train_query(
+        TrainingExample("prompt-2", frozenset({1}), 3)
+    )
+
+    assert first.ppo_pass_metrics == ()
+    assert completed.loss == pytest.approx(11.0)  # Backwards-compatible query metric.
+    assert len(completed.ppo_pass_metrics) == 2
+    pass_one, pass_two = completed.ppo_pass_metrics
+    assert isinstance(pass_one, PPOPassMetrics)
+    assert pass_one.ppo_pass == 1
+    assert pass_one.active_token_count == 10
+    assert pass_one.loss == pytest.approx(9.0)
+    assert pass_one.policy_loss == pytest.approx(10.0)
+    assert pass_one.kl == pytest.approx(11.0)
+    assert pass_one.clip_fraction == pytest.approx(0.5)
+    assert pass_two.ppo_pass == 2
+    assert pass_two.active_token_count == 10
+    assert pass_two.loss == pytest.approx(29.0)
+    assert pass_two.policy_loss == pytest.approx(30.0)
+    assert pass_two.kl == pytest.approx(31.0)
+    assert pass_two.clip_fraction == pytest.approx(0.6)
+    assert trainer.last_ppo_pass_metrics == completed.ppo_pass_metrics
+
+
+def test_pending_replay_targets_are_cpu_resident_and_graph_free(monkeypatch):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=2,
+        ppo_passes=2,
+    )
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss",
+        _controlled_mean_loss([(3, 1.0)]),
+    )
+
+    trainer.train_query(TrainingExample("prompt", frozenset({1}), 3))
+    pending = trainer._pending_replay_queries[0]
+
+    for batch in (pending.old, pending.reference):
+        assert batch.logps.device.type == "cpu"
+        assert not batch.logps.requires_grad
+        assert batch.logps.grad_fn is None
+        assert batch.completion_mask.device.type == "cpu"
+        assert not batch.completion_mask.requires_grad
+        assert batch.completion_mask.grad_fn is None
+    with pytest.raises(RuntimeError, match="clean rollout boundary"):
+        trainer.training_state_dict()
+    with pytest.raises(RuntimeError, match="clean rollout boundary"):
+        trainer.load_training_state_dict(
+            {"version": 1, "rollout_steps": 0, "optimizer_steps": 0, "ppo_passes": 2}
+        )
+
+
+def test_replay_failure_poisons_trainer_and_discards_partial_state(monkeypatch):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=2,
+        ppo_passes=2,
+        max_grad_norm=None,
+    )
+    calls = 0
+
+    def failing_loss(current_logps, *_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("replay exploded")
+        mean = current_logps[0, 0]
+        zero = mean.detach() * 0.0
+        return BNPOLossOutput(
+            loss=mean,
+            policy_loss=mean,
+            kl=zero,
+            clip_fraction=zero,
+            token_count=torch.tensor(1, device=current_logps.device),
+        )
+
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss", failing_loss
+    )
+    trainer.train_query(TrainingExample("prompt-1", frozenset({1}), 3))
+
+    with pytest.raises(RuntimeError, match="replay exploded"):
+        trainer.train_query(TrainingExample("prompt-2", frozenset({1}), 3))
+
+    assert trainer.poisoned
+    assert trainer.optimizer_steps == 1
+    assert trainer.rollout_steps == 0
+    assert trainer.pending_micro_steps == 0
+    assert trainer.pending_active_tokens == 0
+    assert trainer._pending_replay_queries == []
+    assert actor.parameter.grad is None
+    with pytest.raises(RuntimeError, match="poisoned"):
+        trainer.train_query(TrainingExample("prompt-3", frozenset({1}), 3))
+    with pytest.raises(RuntimeError, match="poisoned"):
+        trainer.flush_gradients()
+    with pytest.raises(RuntimeError, match="poisoned"):
+        trainer.training_state_dict()
+
+
+@pytest.mark.parametrize("nonfinite_field", ["loss", "policy_loss", "kl", "clip_fraction"])
+def test_nonfinite_first_pass_diagnostic_poisons_pending_rollout_before_step(
+    monkeypatch,
+    nonfinite_field,
+):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=2,
+        ppo_passes=1,
+        max_grad_norm=None,
+    )
+    calls = 0
+
+    def nonfinite_loss(current_logps, *_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        differentiable = current_logps[0, 0]
+        values = {
+            "loss": differentiable,
+            "policy_loss": differentiable.detach(),
+            "kl": differentiable.detach(),
+            "clip_fraction": differentiable.detach(),
+        }
+        if calls == 2:
+            replacement = differentiable.detach().new_tensor(float("nan"))
+            if nonfinite_field == "loss":
+                replacement = differentiable * 0.0 + replacement
+            values[nonfinite_field] = replacement
+        return BNPOLossOutput(
+            **values,
+            token_count=torch.tensor(1, device=current_logps.device),
+        )
+
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss", nonfinite_loss
+    )
+    trainer.train_query(TrainingExample("prompt-1", frozenset({1}), 3))
+
+    with pytest.raises(FloatingPointError, match=f"non-finite MaskPO {nonfinite_field}"):
+        trainer.train_query(TrainingExample("prompt-2", frozenset({1}), 3))
+
+    assert trainer.poisoned
+    assert trainer.optimizer_steps == 0
+    assert trainer.rollout_steps == 0
+    assert actor.parameter.item() == pytest.approx(0.0)
+    assert actor.parameter.grad is None
+    assert ("optimizer_step",) not in events
+
+
+def test_nonfinite_replay_diagnostic_prevents_second_optimizer_step(monkeypatch):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=1,
+        ppo_passes=2,
+        max_grad_norm=None,
+    )
+    calls = 0
+
+    def nonfinite_replay_loss(current_logps, *_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        loss = current_logps[0, 0]
+        zero = loss.detach() * 0.0
+        clip_fraction = zero if calls == 1 else zero.new_tensor(float("nan"))
+        return BNPOLossOutput(
+            loss=loss,
+            policy_loss=loss,
+            kl=zero,
+            clip_fraction=clip_fraction,
+            token_count=torch.tensor(1, device=current_logps.device),
+        )
+
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss", nonfinite_replay_loss
+    )
+
+    with pytest.raises(FloatingPointError, match="non-finite MaskPO clip_fraction"):
+        trainer.train_query(TrainingExample("prompt", frozenset({1}), 3))
+
+    assert trainer.poisoned
+    assert trainer.optimizer_steps == 1
+    assert trainer.rollout_steps == 0
+    assert actor.parameter.item() == pytest.approx(-0.01)
+    assert torch.isfinite(actor.parameter)
+    assert actor.parameter.grad is None
+    assert events.count(("optimizer_step",)) == 1
+
+
+@pytest.mark.parametrize(
+    ("max_grad_norm", "error_type"),
+    [(1.0, RuntimeError), (None, FloatingPointError)],
+)
+def test_nonfinite_gradient_is_rejected_before_optimizer_step(
+    monkeypatch,
+    max_grad_norm,
+    error_type,
+):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=1,
+        ppo_passes=1,
+        max_grad_norm=max_grad_norm,
+    )
+
+    def nonfinite_gradient_loss(current_logps, *_args, **_kwargs):
+        loss = current_logps[0, 0]
+        loss.register_hook(lambda gradient: torch.full_like(gradient, float("inf")))
+        zero = loss.detach() * 0.0
+        return BNPOLossOutput(
+            loss=loss,
+            policy_loss=loss,
+            kl=zero,
+            clip_fraction=zero,
+            token_count=torch.tensor(1, device=current_logps.device),
+        )
+
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss",
+        nonfinite_gradient_loss,
+    )
+
+    with pytest.raises(error_type, match="non-finite"):
+        trainer.train_query(TrainingExample("prompt", frozenset({1}), 3))
+
+    assert trainer.poisoned
+    assert trainer.optimizer_steps == 0
+    assert trainer.rollout_steps == 0
+    assert actor.parameter.item() == pytest.approx(0.0)
+    assert torch.isfinite(actor.parameter)
+    assert actor.parameter.grad is None
+    assert ("optimizer_step",) not in events
+
+
+def test_canonical_eight_prompt_rollout_counts_two_optimizer_steps(monkeypatch):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        gradient_accumulation_steps=8,
+        ppo_passes=2,
+        max_grad_norm=None,
+    )
+
+    def zero_gradient_loss(current_logps, *_args, **_kwargs):
+        loss = current_logps[0, 0] * 0.0
+        zero = loss.detach()
+        return BNPOLossOutput(
+            loss=loss,
+            policy_loss=loss,
+            kl=zero,
+            clip_fraction=zero,
+            token_count=torch.tensor(1, device=current_logps.device),
+        )
+
+    monkeypatch.setattr(
+        "openbench_rerank_rl.trainer.tokenwise_bnpo_loss", zero_gradient_loss
+    )
+
+    results = [
+        trainer.train_query(
+            TrainingExample(f"prompt-{index}", frozenset({1}), 3)
+        )
+        for index in range(8)
+    ]
+
+    assert all(not result.rollout_step_completed for result in results[:7])
+    assert results[-1].rollout_step_completed
+    assert results[-1].rollout_step == 1
+    assert results[-1].optimizer_steps_applied == 2
+    assert results[-1].optimizer_step == 2
+    assert trainer.rollout_steps == 1
+    assert trainer.optimizer_steps == 2
+    assert actor.generated_sample_count == 8 * 20
+
+
+def test_training_state_counters_round_trip_at_a_clean_boundary():
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        ppo_passes=2,
+    )
+    state = {
+        "version": 1,
+        "rollout_steps": 300,
+        "optimizer_steps": 600,
+        "ppo_passes": 2,
+    }
+
+    trainer.load_training_state_dict(state)
+
+    assert trainer.rollout_steps == 300
+    assert trainer.optimizer_steps == 600
+    assert trainer.training_state_dict() == state
+    assert trainer.last_ppo_pass_metrics == ()
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        (
+            {"version": 1, "rollout_steps": 3, "optimizer_steps": 6, "ppo_passes": 1},
+            "ppo_passes does not match",
+        ),
+        (
+            {"version": 1, "rollout_steps": 3, "optimizer_steps": 5, "ppo_passes": 2},
+            r"optimizer_steps must equal rollout_steps \* ppo_passes",
+        ),
+        (
+            {"version": 2, "rollout_steps": 3, "optimizer_steps": 6, "ppo_passes": 2},
+            "unsupported training state version",
+        ),
+        (
+            {"version": 1, "rollout_steps": True, "optimizer_steps": 0, "ppo_passes": 2},
+            "rollout_steps must be a non-negative integer",
+        ),
+    ],
+)
+def test_training_state_rejects_incompatible_or_invalid_counters(state, message):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    trainer = MaskPOTrainer(
+        actor=actor,
+        reference=reference,
+        optimizer=RecordingSGD(actor.trainable_parameters(), events),
+        ppo_passes=2,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        trainer.load_training_state_dict(state)
+    assert trainer.training_state_dict() == {
+        "version": 1,
+        "rollout_steps": 0,
+        "optimizer_steps": 0,
+        "ppo_passes": 2,
+    }
+
+
+@pytest.mark.parametrize("ppo_passes", [0, -1, 1.5, True])
+def test_ppo_passes_requires_a_positive_integer(ppo_passes):
+    events: list[tuple] = []
+    actor = FakeBackend("actor", events, trainable=True)
+    reference = FakeBackend("reference", events, trainable=False)
+    with pytest.raises(ValueError, match="ppo_passes"):
+        MaskPOTrainer(
+            actor=actor,
+            reference=reference,
+            optimizer=RecordingSGD(actor.trainable_parameters(), events),
+            ppo_passes=ppo_passes,
+        )
 
 
 def test_training_example_rejects_out_of_range_positive():
@@ -419,3 +916,95 @@ def test_adapter_targets_are_limited_to_complete_serialized_lora_pairs():
     )
     assert retained == ("q_proj",)
     assert missing == ("k_proj", "lm_head")
+
+
+def test_huggingface_loader_can_resume_actor_without_changing_phase2_reference(
+    monkeypatch,
+):
+    tokenizer_calls: list[str] = []
+    config_calls: list[str] = []
+    peft_calls: list[tuple[str, bool, str]] = []
+    model_calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeAutoTokenizer:
+        @classmethod
+        def from_pretrained(cls, path, **_kwargs):
+            tokenizer_calls.append(str(path))
+            return _TinyTokenizer()
+
+    class FakeAutoModel:
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            model_calls.append((str(path), kwargs))
+            return torch.nn.Module()
+
+    class FakePeftConfig:
+        @classmethod
+        def from_pretrained(cls, path):
+            config_calls.append(str(path))
+            return SimpleNamespace(target_modules=None, source=str(path))
+
+    class FakePeftModel(torch.nn.Module):
+        def __init__(self, *, trainable: bool) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(
+                torch.tensor(0.0), requires_grad=trainable
+            )
+            self.config = SimpleNamespace(use_cache=True)
+
+        @classmethod
+        def from_pretrained(cls, _base, path, *, config, is_trainable):
+            peft_calls.append((str(path), bool(is_trainable), config.source))
+            return cls(trainable=bool(is_trainable))
+
+    peft_module = ModuleType("peft")
+    peft_module.PeftConfig = FakePeftConfig
+    peft_module.PeftModel = FakePeftModel
+    transformers_module = ModuleType("transformers")
+    transformers_module.AutoModelForCausalLM = FakeAutoModel
+    transformers_module.AutoTokenizer = FakeAutoTokenizer
+    monkeypatch.setitem(sys.modules, "peft", peft_module)
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+
+    resumed = load_huggingface_maskpo_trainer(
+        model_name_or_path="base-model",
+        adapter_path="phase2-reference",
+        actor_adapter_path="rollout-300-adapter",
+        revision="70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+        dtype="float32",
+        device_map=None,
+        gradient_checkpointing=False,
+    )
+
+    assert tokenizer_calls == ["rollout-300-adapter"]
+    assert config_calls == ["rollout-300-adapter", "phase2-reference"]
+    assert peft_calls == [
+        ("rollout-300-adapter", True, "rollout-300-adapter"),
+        ("phase2-reference", False, "phase2-reference"),
+    ]
+    assert [path for path, _kwargs in model_calls] == ["base-model", "base-model"]
+    assert [kwargs["revision"] for _path, kwargs in model_calls] == [
+        "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+        "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+    ]
+    assert next(resumed.actor.trainable_parameters()).requires_grad
+    assert not next(resumed.reference.model.parameters()).requires_grad
+
+    tokenizer_calls.clear()
+    config_calls.clear()
+    peft_calls.clear()
+    model_calls.clear()
+    load_huggingface_maskpo_trainer(
+        model_name_or_path="base-model",
+        adapter_path="phase2-reference",
+        dtype="float32",
+        device_map=None,
+        gradient_checkpointing=False,
+    )
+    assert tokenizer_calls == ["phase2-reference"]
+    assert config_calls == ["phase2-reference"]
+    assert peft_calls == [
+        ("phase2-reference", True, "phase2-reference"),
+        ("phase2-reference", False, "phase2-reference"),
+    ]
+    assert all("revision" not in kwargs for _path, kwargs in model_calls)

@@ -209,8 +209,17 @@ L_BNPO = (1 / |T|) * sum_{t in T} (L_policy,t + 0.001 * KL_t)
 ```
 
 Old-policy log probabilities, reference log probabilities, routed advantages,
-and counterfactual generations are detached targets.  The actor is updated only
-after all four originals and their probes have been sampled and scored.
+and counterfactual generations are detached targets. Eight distinct queries are
+collected while the actor remains unchanged, yielding 32 originals and at most
+128 counterfactual probes in one fresh rollout batch. The actor is updated only
+after that complete batch has been sampled and scored.
+
+Each fresh rollout batch is reused for two PPO passes. Pass 1 applies the
+globally token-normalized gradient accumulated during collection. Pass 2
+recomputes current-policy log probabilities for the same 32 originals after the
+first update, while keeping `pi_old`, `pi_ref`, and all routed advantages fixed.
+Counterfactual suffixes are never regenerated during replay and never enter
+either gradient pass. Thus one rollout step produces two optimizer updates.
 
 ## 7. Constants for the latest run
 
@@ -231,14 +240,19 @@ after all four originals and their probes have been sampled and scored.
 | Sampling top-k | `20` |
 | Sampling top-p | `0.95` |
 | Maximum new tokens, originals and probes | `2048` |
-| Distinct prompts per optimizer update | `8` initially (`16` after throughput profiling) |
-| Effective originals per optimizer update | `32` initially (`64` at prompt batch 16) |
+| Distinct prompts per fresh rollout step | `8` |
+| Effective originals per fresh rollout step | `32` |
+| PPO passes / optimizer updates per rollout step | `2` |
+| Fresh rollout steps | `3,000` |
+| Distinct training prompts | `24,000` |
+| Total optimizer updates | `6,000` |
 
 These runtime hyperparameters specify the current new run; they are not claims
-about an unrecoverable historical optimizer configuration.  Prompt batch 8 is
+about an unrecoverable historical optimizer configuration. Prompt batch 8 is
 formed by accumulating eight distinct query groups, each with four sibling
-originals, before one update.  Prompt batch 16 accumulates sixteen groups and
-should be enabled only after profiling throughput.  Accumulation retains the
-exact BNPO reduction: token-loss sums and active-token counts are accumulated,
-then the gradient is normalized once over all active original tokens in the
-optimizer batch.
+originals, before the first update. Accumulation retains the exact BNPO
+reduction: token-loss sums and active-token counts are accumulated, then the
+gradient is normalized once over all active original tokens in the rollout
+batch. The second pass uses the same global token normalization after replaying
+those originals. The separately profiled counterfactual *generation*
+microbatch is 16; it does not change the eight-prompt optimization batch.

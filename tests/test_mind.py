@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from openbench_rerank_rl.mind import (
     build_example,
     deterministic_sample,
     deterministic_split,
+    deterministic_training_order,
     filter_examples,
     iter_behaviors_tsv,
     load_examples,
@@ -98,6 +100,44 @@ def test_filters_sampling_and_split_are_stable_and_order_preserving():
     )
 
 
+def test_training_order_is_repeatable_seed_sensitive_and_membership_preserving():
+    template = load_examples(
+        FIXTURES / "news.tsv.fixture",
+        FIXTURES / "behaviors.tsv.fixture",
+    )[0]
+    examples = [
+        replace(
+            template,
+            impression_id=f"I{index:02d}",
+            user_id=f"U{index % 7}",
+            impression_time=f"11/{index + 1}/2019 1:00:00 PM",
+        )
+        for index in range(32)
+    ]
+    train, validation = deterministic_split(
+        examples,
+        validation_fraction=0.25,
+        seed=29,
+    )
+
+    ordered_a = deterministic_training_order(train, seed=123)
+    ordered_b = deterministic_training_order(train, seed=123)
+    ordered_other_seed = deterministic_training_order(train, seed=124)
+
+    assert ordered_a == ordered_b
+    assert ordered_a != ordered_other_seed
+    assert {row.impression_id for row in ordered_a} == {
+        row.impression_id for row in train
+    }
+    assert len(ordered_a) == len(train)
+    # Ordering happens after the split and neither mutates nor reorders validation.
+    assert validation == deterministic_split(
+        examples,
+        validation_fraction=0.25,
+        seed=29,
+    )[1]
+
+
 def test_prepare_cli_is_reproducible_and_does_not_copy_raw_files(tmp_path):
     root = Path(__file__).parents[1]
     script = root / "scripts" / "prepare_mind.py"
@@ -147,3 +187,74 @@ def test_prepare_cli_is_reproducible_and_does_not_copy_raw_files(tmp_path):
     ]
     assert len(rows) == 2  # no-positive I3 is filtered by default
     assert all("prompt" in row for row in rows)
+
+
+def test_prepare_cli_shuffle_only_changes_training_order(tmp_path):
+    root = Path(__file__).parents[1]
+    script = root / "scripts" / "prepare_mind.py"
+    behaviors = tmp_path / "behaviors.tsv"
+    behaviors.write_text(
+        "".join(
+            f"I{index:02d}\tU{index % 7}\t11/{index + 1}/2019 1:00:00 PM"
+            "\tN1 N2\tN2-1 N3-0\n"
+            for index in range(32)
+        ),
+        encoding="utf-8",
+    )
+    output_source_order = tmp_path / "source-order"
+    output_shuffled = tmp_path / "shuffled"
+    base_command = [
+        sys.executable,
+        str(script),
+        "--news",
+        str(FIXTURES / "news.tsv.fixture"),
+        "--behaviors",
+        str(behaviors),
+        "--validation-fraction",
+        "0.25",
+        "--seed",
+        "123",
+    ]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(root / "src") + os.pathsep + environment.get(
+        "PYTHONPATH", ""
+    )
+    subprocess.run(
+        base_command + ["--output-dir", str(output_source_order)],
+        check=True,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        base_command
+        + ["--shuffle-training", "--output-dir", str(output_shuffled)],
+        check=True,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    source_train = [
+        json.loads(line)["id"]
+        for line in (output_source_order / "train.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    shuffled_train = [
+        json.loads(line)["id"]
+        for line in (output_shuffled / "train.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert shuffled_train != source_train
+    assert set(shuffled_train) == set(source_train)
+    assert (output_shuffled / "validation.jsonl").read_bytes() == (
+        output_source_order / "validation.jsonl"
+    ).read_bytes()
+    assert "shuffle_training" not in json.loads(
+        (output_source_order / "summary.json").read_text(encoding="utf-8")
+    )
+    assert json.loads(
+        (output_shuffled / "summary.json").read_text(encoding="utf-8")
+    )["shuffle_training"] is True

@@ -19,7 +19,7 @@ from __future__ import annotations
 import copy
 import inspect
 import warnings
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -187,6 +187,18 @@ class PolicyBackend(Protocol):
 
 
 @dataclass(frozen=True)
+class PPOPassMetrics:
+    """Token-weighted diagnostics for one pass over a full rollout step."""
+
+    ppo_pass: int
+    loss: float
+    policy_loss: float
+    kl: float
+    clip_fraction: float
+    active_token_count: int
+
+
+@dataclass(frozen=True)
 class TrainStepResult:
     """Outputs and diagnostics for one query-level MaskPO micro-step."""
 
@@ -202,10 +214,26 @@ class TrainStepResult:
     active_token_count: int
     optimizer_stepped: bool
     optimizer_step: int
+    optimizer_steps_applied: int
+    rollout_step_completed: bool
+    rollout_step: int
+    ppo_pass_metrics: tuple[PPOPassMetrics, ...]
 
     @property
     def routing_fallback_count(self) -> int:
         return sum(route.used_sequence_fallback for route in self.routes)
+
+
+@dataclass(frozen=True)
+class _ReplayQuery:
+    """Detached fixed targets needed to revisit one sampled query group."""
+
+    originals: tuple[GeneratedCompletion, ...]
+    routes: tuple[RoutingResult, ...]
+    old: LogProbBatch
+    reference: LogProbBatch
+    active_token_count: int
+    first_pass_metrics: PPOPassMetrics
 
 
 class MaskPOTrainer:
@@ -223,6 +251,7 @@ class MaskPOTrainer:
         reference_kl_coefficient: float = 0.001,
         normalization_epsilon: float = 1e-8,
         gradient_accumulation_steps: int = 1,
+        ppo_passes: int = 2,
         max_grad_norm: float | None = 1.0,
     ) -> None:
         if maskpo_config.num_siblings != 4:
@@ -239,6 +268,8 @@ class MaskPOTrainer:
             raise ValueError("normalization_epsilon must be non-negative")
         if gradient_accumulation_steps <= 0:
             raise ValueError("gradient_accumulation_steps must be positive")
+        if type(ppo_passes) is not int or ppo_passes <= 0:
+            raise ValueError("ppo_passes must be a positive integer")
         if max_grad_norm is not None and max_grad_norm <= 0:
             raise ValueError("max_grad_norm must be positive or None")
 
@@ -251,14 +282,107 @@ class MaskPOTrainer:
         self.reference_kl_coefficient = reference_kl_coefficient
         self.normalization_epsilon = normalization_epsilon
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.ppo_passes = ppo_passes
         self.max_grad_norm = max_grad_norm
         self._pending_micro_steps = 0
         self._pending_active_tokens = 0
+        self._pending_replay_queries: list[_ReplayQuery] = []
         self._optimizer_steps = 0
+        self._rollout_steps = 0
+        self._last_ppo_pass_metrics: tuple[PPOPassMetrics, ...] = ()
+        self._poisoned = False
 
     @property
     def optimizer_steps(self) -> int:
         return self._optimizer_steps
+
+    @property
+    def rollout_steps(self) -> int:
+        """Number of fresh accumulated rollout windows optimized so far."""
+
+        return self._rollout_steps
+
+    @property
+    def last_ppo_pass_metrics(self) -> tuple[PPOPassMetrics, ...]:
+        """Aggregate metrics from the last successfully completed rollout step."""
+
+        return self._last_ppo_pass_metrics
+
+    @property
+    def poisoned(self) -> bool:
+        """Whether a failed backward/update made this trainer unsafe to reuse."""
+
+        return self._poisoned
+
+    def _require_clean_rollout_boundary(self) -> None:
+        """Reject state operations while a rollout is partial or invalid."""
+
+        self._ensure_healthy()
+        if (
+            self._pending_micro_steps != 0
+            or self._pending_active_tokens != 0
+            or self._pending_replay_queries
+        ):
+            raise RuntimeError(
+                "training state is only available at a clean rollout boundary"
+            )
+        expected_optimizer_steps = self._rollout_steps * self.ppo_passes
+        if self._optimizer_steps != expected_optimizer_steps:
+            raise RuntimeError(
+                "trainer counters are inconsistent: optimizer_steps must equal "
+                "rollout_steps * ppo_passes"
+            )
+
+    def training_state_dict(self) -> dict[str, int]:
+        """Return boundary-safe counters for a matching model/optimizer checkpoint."""
+
+        self._require_clean_rollout_boundary()
+        return {
+            "version": 1,
+            "rollout_steps": self._rollout_steps,
+            "optimizer_steps": self._optimizer_steps,
+            "ppo_passes": self.ppo_passes,
+        }
+
+    def load_training_state_dict(self, state: Mapping[str, object]) -> None:
+        """Restore counters at a clean boundary after model/optimizer restoration."""
+
+        self._require_clean_rollout_boundary()
+        if not isinstance(state, Mapping):
+            raise TypeError("training state must be a mapping")
+        expected_keys = {"version", "rollout_steps", "optimizer_steps", "ppo_passes"}
+        if set(state) != expected_keys:
+            raise ValueError(
+                "training state must contain exactly version, rollout_steps, "
+                "optimizer_steps, and ppo_passes"
+            )
+
+        def nonnegative_int(key: str) -> int:
+            value = state[key]
+            if type(value) is not int or value < 0:
+                raise ValueError(f"training state {key} must be a non-negative integer")
+            return value
+
+        version = nonnegative_int("version")
+        rollout_steps = nonnegative_int("rollout_steps")
+        optimizer_steps = nonnegative_int("optimizer_steps")
+        state_ppo_passes = nonnegative_int("ppo_passes")
+        if version != 1:
+            raise ValueError(f"unsupported training state version: {version}")
+        if state_ppo_passes != self.ppo_passes:
+            raise ValueError(
+                "training state ppo_passes does not match this trainer: "
+                f"{state_ppo_passes} != {self.ppo_passes}"
+            )
+        if optimizer_steps != rollout_steps * state_ppo_passes:
+            raise ValueError(
+                "training state optimizer_steps must equal rollout_steps * "
+                "ppo_passes"
+            )
+
+        self._rollout_steps = rollout_steps
+        self._optimizer_steps = optimizer_steps
+        self._last_ppo_pass_metrics = ()
 
     @property
     def pending_micro_steps(self) -> int:
@@ -393,38 +517,212 @@ class MaskPOTrainer:
             ):
                 raise ValueError(f"{name} completion mask differs from current mask")
 
-    def _apply_gradients_if_ready(self, active_token_count: int) -> bool:
-        self._pending_micro_steps += 1
-        self._pending_active_tokens += active_token_count
-        if self._pending_micro_steps < self.gradient_accumulation_steps:
-            return False
-        self._finish_optimizer_step()
-        return True
+    @staticmethod
+    def _detach_logprob_batch(batch: LogProbBatch) -> LogProbBatch:
+        """Move fixed PPO targets off accelerator memory without retaining graphs."""
 
-    def _finish_optimizer_step(self) -> None:
+        return LogProbBatch(
+            logps=batch.logps.detach().to("cpu").clone(),
+            completion_mask=batch.completion_mask.detach().to("cpu").clone(),
+        )
+
+    @staticmethod
+    def _query_pass_metrics(
+        loss_output: BNPOLossOutput,
+        *,
+        ppo_pass: int,
+        active_token_count: int,
+    ) -> PPOPassMetrics:
+        """Detach one query's mean metrics for later batch aggregation."""
+
+        torch = _torch()
+
+        def scalar(value: Tensor) -> float:
+            return float(value.detach().to(dtype=torch.float32, device="cpu").item())
+
+        return PPOPassMetrics(
+            ppo_pass=ppo_pass,
+            loss=scalar(loss_output.loss),
+            policy_loss=scalar(loss_output.policy_loss),
+            kl=scalar(loss_output.kl),
+            clip_fraction=scalar(loss_output.clip_fraction),
+            active_token_count=active_token_count,
+        )
+
+    @staticmethod
+    def _aggregate_pass_metrics(
+        query_metrics: Sequence[PPOPassMetrics],
+    ) -> PPOPassMetrics:
+        """Combine query means with the same token weighting used for gradients."""
+
+        if not query_metrics:
+            raise RuntimeError("cannot aggregate an empty PPO pass")
+        ppo_pass = query_metrics[0].ppo_pass
+        if any(item.ppo_pass != ppo_pass for item in query_metrics):
+            raise RuntimeError("cannot aggregate metrics from different PPO passes")
+        active_token_count = sum(item.active_token_count for item in query_metrics)
+        denominator = max(active_token_count, 1)
+
+        def weighted(name: str) -> float:
+            return sum(
+                getattr(item, name) * item.active_token_count
+                for item in query_metrics
+            ) / denominator
+
+        return PPOPassMetrics(
+            ppo_pass=ppo_pass,
+            loss=weighted("loss"),
+            policy_loss=weighted("policy_loss"),
+            kl=weighted("kl"),
+            clip_fraction=weighted("clip_fraction"),
+            active_token_count=active_token_count,
+        )
+
+    @staticmethod
+    def _validate_finite_loss_output(loss_output: BNPOLossOutput) -> None:
+        """Reject non-finite optimizer diagnostics before they reach backward."""
+
+        torch = _torch()
+        for name in ("loss", "policy_loss", "kl", "clip_fraction"):
+            value = torch.as_tensor(getattr(loss_output, name)).detach()
+            if value.numel() != 1:
+                raise ValueError(f"MaskPO {name} diagnostic must be scalar")
+            if not bool(torch.isfinite(value).to(device="cpu").item()):
+                raise FloatingPointError(f"non-finite MaskPO {name} diagnostic")
+
+    def _ensure_healthy(self) -> None:
+        if self._poisoned:
+            raise RuntimeError(
+                "MaskPOTrainer is poisoned after a failed backward or optimizer "
+                "pass; restart from the last completed-rollout checkpoint"
+            )
+
+    def _poison(self) -> None:
+        """Discard partial gradients and prevent reuse after a non-atomic failure."""
+
+        self._poisoned = True
+        try:
+            self.optimizer.zero_grad(set_to_none=True)
+        except Exception:
+            # Preserve the original training failure; the poisoned guard still
+            # prevents any attempt to reuse possibly inconsistent state.
+            pass
+        self._pending_micro_steps = 0
+        self._pending_active_tokens = 0
+        self._pending_replay_queries.clear()
+
+    def _backward_replay_query(self, query: _ReplayQuery) -> BNPOLossOutput:
+        """Backpropagate one replay query against its fixed behavior policy."""
+
+        current = self.actor.token_logps(query.originals, requires_grad=True)
+        self._validate_logprob_batches(current, query.old, query.reference)
+        advantages = self._advantage_tensor(query.routes, current.logps)
+        loss_output: BNPOLossOutput = tokenwise_bnpo_loss(
+            current.logps,
+            query.old.logps,
+            query.reference.logps,
+            advantages,
+            current.completion_mask,
+            clip_epsilon=self.ppo_clip,
+            beta=self.reference_kl_coefficient,
+        )
+        self._validate_finite_loss_output(loss_output)
+        active_token_count = int(loss_output.token_count.detach().to("cpu").item())
+        if active_token_count != query.active_token_count:
+            raise RuntimeError("replayed completion token count changed")
+        summed_loss = loss_output.loss * active_token_count
+        if not summed_loss.requires_grad:
+            raise RuntimeError("actor log probabilities do not carry gradients")
+        summed_loss.backward()
+        return loss_output
+
+    def _apply_gradients_if_ready(
+        self, query: _ReplayQuery
+    ) -> tuple[PPOPassMetrics, ...]:
+        self._pending_replay_queries.append(query)
+        self._pending_micro_steps += 1
+        self._pending_active_tokens += query.active_token_count
+        if self._pending_micro_steps < self.gradient_accumulation_steps:
+            return ()
+        return self._finish_rollout_step()
+
+    def _take_optimizer_step(self, active_token_count: int) -> None:
         torch = _torch()
         parameters = tuple(self.actor.trainable_parameters())
         # Micro-queries backpropagate token-loss sums.  Normalize once over all
         # active tokens in the complete (or flushed partial) accumulation window
         # so variable-length query groups receive true batch-normalized weight.
-        denominator = max(self._pending_active_tokens, 1)
+        denominator = max(active_token_count, 1)
         for parameter in parameters:
             if parameter.grad is not None:
                 parameter.grad.div_(denominator)
         if self.max_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(parameters, self.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(
+                parameters,
+                self.max_grad_norm,
+                error_if_nonfinite=True,
+            )
+        else:
+            for parameter in parameters:
+                if parameter.grad is not None and not bool(
+                    torch.isfinite(parameter.grad).all().to(device="cpu").item()
+                ):
+                    raise FloatingPointError(
+                        "non-finite trainable gradient before optimizer step"
+                    )
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
+        self._optimizer_steps += 1
+
+    def _finish_rollout_step(self) -> tuple[PPOPassMetrics, ...]:
+        """Optimize one sampled window, replaying it without regeneration."""
+
+        if not self._pending_replay_queries:
+            raise RuntimeError("cannot optimize an empty rollout batch")
+        active_token_count = self._pending_active_tokens
+        pass_metrics = [
+            self._aggregate_pass_metrics(
+                [query.first_pass_metrics for query in self._pending_replay_queries]
+            )
+        ]
+
+        try:
+            # The first pass was backpropagated incrementally while the behavior
+            # policy remained unchanged. Each later pass revisits detached targets
+            # one query at a time, bounding peak activation memory independently of
+            # the number of accumulated prompts.
+            self._take_optimizer_step(active_token_count)
+            for ppo_pass in range(2, self.ppo_passes + 1):
+                replay_metrics: list[PPOPassMetrics] = []
+                for query in self._pending_replay_queries:
+                    loss_output = self._backward_replay_query(query)
+                    replay_metrics.append(
+                        self._query_pass_metrics(
+                            loss_output,
+                            ppo_pass=ppo_pass,
+                            active_token_count=query.active_token_count,
+                        )
+                    )
+                pass_metrics.append(self._aggregate_pass_metrics(replay_metrics))
+                self._take_optimizer_step(active_token_count)
+        except BaseException:
+            self._poison()
+            raise
+
         self._pending_micro_steps = 0
         self._pending_active_tokens = 0
-        self._optimizer_steps += 1
+        self._pending_replay_queries.clear()
+        self._rollout_steps += 1
+        self._last_ppo_pass_metrics = tuple(pass_metrics)
+        return self._last_ppo_pass_metrics
 
     def flush_gradients(self) -> bool:
         """Apply a final partial accumulation window, if one exists."""
 
+        self._ensure_healthy()
         if self._pending_micro_steps == 0:
             return False
-        self._finish_optimizer_step()
+        self._finish_rollout_step()
         return True
 
     def train_query(self, example: TrainingExample) -> TrainStepResult:
@@ -435,7 +733,7 @@ class MaskPOTrainer:
         it structurally impossible for probe tokens to enter the BNPO loss.
         """
 
-        torch = _torch()
+        self._ensure_healthy()
 
         # This is the complete frozen-policy sampling phase.  In particular,
         # zero_grad/backward/step cannot occur while originals or probes are
@@ -460,24 +758,43 @@ class MaskPOTrainer:
         self._validate_logprob_batches(current, old, reference)
         advantages = self._advantage_tensor(routes, current.logps)
 
-        loss_output: BNPOLossOutput = tokenwise_bnpo_loss(
-            current.logps,
-            old.logps,
-            reference.logps,
-            advantages,
-            current.completion_mask,
-            clip_epsilon=self.ppo_clip,
-            beta=self.reference_kl_coefficient,
-        )
-        active_token_count = int(loss_output.token_count.detach().to("cpu").item())
-        summed_loss = loss_output.loss * active_token_count
-        if not summed_loss.requires_grad:
-            raise RuntimeError("actor log probabilities do not carry gradients")
-        summed_loss.backward()
-        optimizer_stepped = self._apply_gradients_if_ready(active_token_count)
-
-        def scalar(value: Tensor) -> float:
-            return float(value.detach().to(dtype=torch.float32, device="cpu").item())
+        try:
+            loss_output: BNPOLossOutput = tokenwise_bnpo_loss(
+                current.logps,
+                old.logps,
+                reference.logps,
+                advantages,
+                current.completion_mask,
+                clip_epsilon=self.ppo_clip,
+                beta=self.reference_kl_coefficient,
+            )
+            self._validate_finite_loss_output(loss_output)
+            active_token_count = int(
+                loss_output.token_count.detach().to("cpu").item()
+            )
+            summed_loss = loss_output.loss * active_token_count
+            if not summed_loss.requires_grad:
+                raise RuntimeError("actor log probabilities do not carry gradients")
+            first_pass_metrics = self._query_pass_metrics(
+                loss_output,
+                ppo_pass=1,
+                active_token_count=active_token_count,
+            )
+            replay_query = _ReplayQuery(
+                originals=originals,
+                routes=routes,
+                old=self._detach_logprob_batch(old),
+                reference=self._detach_logprob_batch(reference),
+                active_token_count=active_token_count,
+                first_pass_metrics=first_pass_metrics,
+            )
+            summed_loss.backward()
+            ppo_pass_metrics = self._apply_gradients_if_ready(replay_query)
+        except BaseException:
+            self._poison()
+            raise
+        optimizer_steps_applied = len(ppo_pass_metrics)
+        rollout_step_completed = bool(ppo_pass_metrics)
 
         return TrainStepResult(
             example_id=example.example_id,
@@ -485,13 +802,17 @@ class MaskPOTrainer:
             routes=routes,
             originals=original_texts,
             counterfactuals=counterfactuals,
-            loss=scalar(loss_output.loss),
-            policy_loss=scalar(loss_output.policy_loss),
-            kl=scalar(loss_output.kl),
-            clip_fraction=scalar(loss_output.clip_fraction),
+            loss=first_pass_metrics.loss,
+            policy_loss=first_pass_metrics.policy_loss,
+            kl=first_pass_metrics.kl,
+            clip_fraction=first_pass_metrics.clip_fraction,
             active_token_count=active_token_count,
-            optimizer_stepped=optimizer_stepped,
+            optimizer_stepped=rollout_step_completed,
             optimizer_step=self._optimizer_steps,
+            optimizer_steps_applied=optimizer_steps_applied,
+            rollout_step_completed=rollout_step_completed,
+            rollout_step=self._rollout_steps,
+            ppo_pass_metrics=ppo_pass_metrics,
         )
 
 
@@ -873,6 +1194,8 @@ def load_huggingface_maskpo_trainer(
     *,
     model_name_or_path: str,
     adapter_path: str,
+    actor_adapter_path: str | None = None,
+    revision: str | None = None,
     learning_rate: float = 1e-5,
     weight_decay: float = 0.0,
     dtype: str = "bfloat16",
@@ -886,14 +1209,18 @@ def load_huggingface_maskpo_trainer(
     reference_kl_coefficient: float = 0.001,
     normalization_epsilon: float = 1e-8,
     gradient_accumulation_steps: int = 1,
+    ppo_passes: int = 2,
     max_grad_norm: float | None = 1.0,
 ) -> MaskPOTrainer:
     """Load trainable and reference copies of the Phase-2 SFT policy.
 
-    ``adapter_path`` must point to ``p2_rubric_reasoning_sft`` (or an explicit
-    compatible reproduction).  The adapter is loaded twice: once trainable,
-    and once frozen as the fixed reference used by the KL penalty.  Loading a
-    raw base model as reference would implement a different algorithm.
+    ``adapter_path`` must always point to ``p2_rubric_reasoning_sft`` (or an
+    explicit compatible reproduction) and is loaded as the frozen reference
+    used by the KL penalty.  By default it also initializes the trainable
+    actor.  On resume, ``actor_adapter_path`` may instead point to a saved RL
+    adapter; its tokenizer and LoRA weights initialize only the actor while
+    ``adapter_path`` remains the Phase-2 reference.  Loading a raw base model
+    as reference would implement a different algorithm.
     """
 
     if learning_rate <= 0:
@@ -916,22 +1243,34 @@ def load_huggingface_maskpo_trainer(
         "torch_dtype": torch_dtype,
         "low_cpu_mem_usage": True,
     }
+    if revision is not None:
+        common_model_kwargs["revision"] = revision
     if device_map is not None:
         common_model_kwargs["device_map"] = device_map
 
+    effective_actor_adapter_path = (
+        adapter_path if actor_adapter_path is None else actor_adapter_path
+    )
     tokenizer = AutoTokenizer.from_pretrained(
-        adapter_path,
+        effective_actor_adapter_path,
         trust_remote_code=trust_remote_code,
     )
-    archived_peft_config = _load_effective_peft_config(adapter_path, PeftConfig)
+    actor_peft_config = _load_effective_peft_config(
+        effective_actor_adapter_path, PeftConfig
+    )
+    reference_peft_config = (
+        copy.deepcopy(actor_peft_config)
+        if effective_actor_adapter_path == adapter_path
+        else _load_effective_peft_config(adapter_path, PeftConfig)
+    )
     actor_base = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         **common_model_kwargs,
     )
     actor_model = PeftModel.from_pretrained(
         actor_base,
-        adapter_path,
-        config=copy.deepcopy(archived_peft_config),
+        effective_actor_adapter_path,
+        config=copy.deepcopy(actor_peft_config),
         is_trainable=True,
     )
     if gradient_checkpointing:
@@ -951,7 +1290,7 @@ def load_huggingface_maskpo_trainer(
     reference_model = PeftModel.from_pretrained(
         reference_base,
         adapter_path,
-        config=copy.deepcopy(archived_peft_config),
+        config=copy.deepcopy(reference_peft_config),
         is_trainable=False,
     )
     reference_model.requires_grad_(False)
@@ -980,5 +1319,6 @@ def load_huggingface_maskpo_trainer(
         reference_kl_coefficient=reference_kl_coefficient,
         normalization_epsilon=normalization_epsilon,
         gradient_accumulation_steps=gradient_accumulation_steps,
+        ppo_passes=ppo_passes,
         max_grad_norm=max_grad_norm,
     )

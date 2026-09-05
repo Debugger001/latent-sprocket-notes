@@ -375,3 +375,32 @@ def deterministic_split(
         value for index, value in enumerate(values) if index in validation_indices
     ]
     return training, validation
+
+
+def deterministic_training_order(
+    examples: Sequence[MindExample],
+    *,
+    seed: int = 0,
+) -> list[MindExample]:
+    """Return a stable pseudorandom order for an already-selected train split.
+
+    The dedicated ``training-order-v1`` hash domain keeps ordering independent
+    from both sampling and split assignment.  Call this only after those two
+    operations so it cannot affect dataset membership or validation ordering.
+    """
+
+    values = list(examples)
+    return [
+        values[index]
+        for index in sorted(
+            range(len(values)),
+            key=lambda index: (
+                _stable_score(
+                    values[index],
+                    seed=seed,
+                    purpose="training-order-v1",
+                ),
+                index,
+            ),
+        )
+    ]

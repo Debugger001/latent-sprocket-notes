@@ -17,6 +17,7 @@ from openbench_rerank_rl.mind import (
     MindNews,
     deterministic_sample,
     deterministic_split,
+    deterministic_training_order,
     filter_examples,
     load_examples,
 )
@@ -51,6 +52,14 @@ def _parser() -> argparse.ArgumentParser:
         help="stable held-out fraction (default: 0, preserving official splits)",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--shuffle-training",
+        action="store_true",
+        help=(
+            "put the final training split in a stable seed-dependent order; "
+            "validation order and split membership are unchanged"
+        ),
+    )
     parser.add_argument(
         "--include-prompts",
         action="store_true",
@@ -120,6 +129,8 @@ def main() -> None:
         validation_fraction=args.validation_fraction,
         seed=args.seed,
     )
+    if args.shuffle_training:
+        train = deterministic_training_order(train, seed=args.seed)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     _write_jsonl(
@@ -141,6 +152,8 @@ def main() -> None:
         "seed": args.seed,
         "max_history": args.max_history,
     }
+    if args.shuffle_training:
+        summary["shuffle_training"] = True
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
