@@ -35,7 +35,7 @@ def test_checked_in_configs_match_shared_run_and_method_specific_clips(
 ):
     config = TRAIN_SCRIPT.load_config(ROOT / "configs" / filename)
     assert config["model"]["revision"] == TRAIN_SCRIPT.MODEL_REVISION
-    assert config["data"]["prompt_style"] == "answer-only-archived"
+    assert config["data"]["prompt_style"] == "answer-only-permutation-schema"
     assert config["data"]["max_slate_size"] == 20
     assert config["generation"]["num_siblings"] == 4
     assert config["generation"]["temperature"] == 0.6
@@ -99,7 +99,7 @@ def test_canonical_config_rejects_smaller_update_and_checkpoint_windows():
         )
 
 
-def test_jsonl_reader_requires_exact_archived_answer_only_header_and_k20(tmp_path):
+def test_jsonl_reader_requires_permutation_schema_and_k20(tmp_path):
     prompt = TRAIN_SCRIPT._expected_answer_only_header(4) + "2019-11-15\n"
     path = tmp_path / "train.jsonl"
     path.write_text(
@@ -119,7 +119,10 @@ def test_jsonl_reader_requires_exact_archived_answer_only_header_and_k20(tmp_pat
     assert examples[0].example_id == "row-private"
     assert examples[0].positives == frozenset({2, 4})
 
-    changed = prompt.replace("[3, 7, 1", "[1, 2, 3")
+    changed = prompt.replace(
+        "[permutation of 1 through K]",
+        "[3, 7, 1, 2, 4, 5, 6, 8, 9, 10]",
+    )
     path.write_text(
         json.dumps(
             {
@@ -131,7 +134,7 @@ def test_jsonl_reader_requires_exact_archived_answer_only_header_and_k20(tmp_pat
         + "\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="exact archived answer-only"):
+    with pytest.raises(ValueError, match="ordering-neutral 1-through-K schema"):
         list(TRAIN_SCRIPT.iter_training_examples(path, max_slate_size=20))
 
     path.write_text(

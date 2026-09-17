@@ -256,6 +256,8 @@ def test_prepare_cli_answer_only_changes_only_prompt_template(tmp_path):
             assert answer_row == rubric_row
             assert "<think>" in rubric_prompt
             assert "Return only a JSON-style list" in answer_prompt
+            assert "[permutation of 1 through K]" in answer_prompt
+            assert "[3, 7, 1, 2, 4, 5, 6, 8, 9, 10]" not in answer_prompt
             assert "<think>" not in answer_prompt
             assert "<answer>" not in answer_prompt
 

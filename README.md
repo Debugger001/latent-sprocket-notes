@@ -46,7 +46,8 @@ The precise equations and edge-case rules are in
 
 Answer-only GRPO and paper-faithful Rank-GRPO controls are specified separately
 in [docs/ANSWER_ONLY_BASELINES.md](docs/ANSWER_ONLY_BASELINES.md). Both use the
-archived Phase-2 teacher answer-only adapter and its bare-list prompt, while
+archived Phase-2 teacher answer-only adapter and the ordering-neutral bare-list
+prompt, while
 matching the stable MaskPO run's shared optimizer, sampling, batching, data,
 and validation settings.
 

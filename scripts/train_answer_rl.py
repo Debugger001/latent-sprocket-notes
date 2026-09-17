@@ -53,11 +53,10 @@ GROUP_SIZE = 4
 PROMPTS_PER_ROLLOUT_STEP = 8
 ORIGINALS_PER_ROLLOUT_STEP = GROUP_SIZE * PROMPTS_PER_ROLLOUT_STEP
 
-# The archived answer-only SFT data used this fixed ten-item example even when
-# a row had K != 10.  Checking the complete instruction header (not merely a
-# generic phrase such as "Return only") prevents silently training an
-# answer-only baseline with the later rubric prompt or a changed demonstration.
-_ARCHIVED_ANSWER_ONLY_PREAMBLE = (
+# Check the complete instruction header (not merely a generic phrase such as
+# "Return only") so a run cannot silently use the old fixed ten-item example
+# or the rubric-reasoning prompt.
+_ANSWER_ONLY_PREAMBLE = (
     "You are ranking a logged news impression slate for a user.\n"
     "Given the user's clicked-news history, the impression timestamp, and the "
     "candidate news articles, rank candidates by how likely the user is to "
@@ -68,8 +67,8 @@ _ARCHIVED_ANSWER_ONLY_PREAMBLE = (
     "from most likely clicked/read to least likely. Do not omit, duplicate, or "
     "invent indices. For this row, K="
 )
-_ARCHIVED_ANSWER_ONLY_EXAMPLE = (
-    " indices. Example: [3, 7, 1, 2, 4, 5, 6, 8, 9, 10]\n\n"
+_ANSWER_ONLY_SCHEMA = (
+    " indices. Example: [permutation of 1 through K]\n\n"
     "Impression time: "
 )
 
@@ -156,12 +155,12 @@ def load_config(path: Path) -> dict[str, Any]:
 
 def _expected_answer_only_header(slate_k: int) -> str:
     return (
-        f"{_ARCHIVED_ANSWER_ONLY_PREAMBLE}{slate_k}, so return exactly "
-        f"{slate_k}{_ARCHIVED_ANSWER_ONLY_EXAMPLE}"
+        f"{_ANSWER_ONLY_PREAMBLE}{slate_k}, so return exactly "
+        f"{slate_k}{_ANSWER_ONLY_SCHEMA}"
     )
 
 
-def _validate_archived_answer_only_prompt(
+def _validate_answer_only_prompt(
     prompt: str,
     *,
     slate_k: int,
@@ -171,8 +170,8 @@ def _validate_archived_answer_only_prompt(
     expected = _expected_answer_only_header(slate_k)
     if not prompt.startswith(expected):
         raise ValueError(
-            f"{source}:{line_number}: prompt does not use the exact archived "
-            "answer-only instruction and fixed ten-item demonstration; "
+            f"{source}:{line_number}: prompt does not use the required "
+            "answer-only instruction and ordering-neutral 1-through-K schema; "
             "rematerialize with prepare_mind.py --prompt-style answer-only"
         )
     if "<think>" in prompt or "<answer>" in prompt:
@@ -216,7 +215,7 @@ def iter_training_examples(
                     f"{path}:{line_number}: k={slate_k} exceeds the configured "
                     f"RL boundary K<={max_slate_size}; filter the prepared data"
                 )
-            _validate_archived_answer_only_prompt(
+            _validate_answer_only_prompt(
                 prompt,
                 slate_k=slate_k,
                 source=path,
@@ -264,7 +263,7 @@ def _validate_canonical_config(
 
     for section, key, expected in (
         (model, "revision", MODEL_REVISION),
-        (data, "prompt_style", "answer-only-archived"),
+        (data, "prompt_style", "answer-only-permutation-schema"),
         (data, "max_slate_size", 20),
         (generation, "num_siblings", GROUP_SIZE),
         (generation, "do_sample", True),
@@ -535,6 +534,7 @@ def _safe_tracking_config(
         "model": Path(model_name).name,
         "model_revision": model_revision,
         "starting_adapter": "p2_teacher_answer_only_sft",
+        "prompt_template": "answer-only-permutation-schema",
         "learning_rate": float(optimization.get("learning_rate", 5e-6)),
         "reference_kl_coefficient": float(
             optimization.get("reference_kl_coefficient", 0.01)

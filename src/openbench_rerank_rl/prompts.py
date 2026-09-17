@@ -154,13 +154,7 @@ def build_reranking_prompt(example: MindExample) -> str:
 
 
 def build_answer_only_reranking_prompt(example: MindExample) -> str:
-    """Build the exact archived MIND answer-only prompt.
-
-    The fixed ten-item example is intentionally preserved even when a row has a
-    different ``K``.  The archived answer-only SFT checkpoint was trained with
-    this wording, so changing the demonstration would create a prompt/checkpoint
-    mismatch for the GRPO and Rank-GRPO baselines.
-    """
+    """Build the MIND answer-only prompt with an ordering-neutral schema."""
 
     k = example.k
     if k < 1:
@@ -178,6 +172,6 @@ def build_answer_only_reranking_prompt(example: MindExample) -> str:
         "list containing every candidate index from 1 to K exactly once, ordered "
         "from most likely clicked/read to least likely. Do not omit, duplicate, or "
         f"invent indices. For this row, K={k}, so return exactly {k} indices. "
-        "Example: [3, 7, 1, 2, 4, 5, 6, 8, 9, 10]\n\n"
+        "Example: [permutation of 1 through K]\n\n"
         f"{_impression_context(example)}"
     )

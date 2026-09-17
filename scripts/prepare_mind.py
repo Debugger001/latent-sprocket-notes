@@ -80,7 +80,8 @@ def _parser() -> argparse.ArgumentParser:
         default="rubric",
         help=(
             "prompt template used with --include-prompts (default: rubric); "
-            "answer-only reproduces the archived GRPO/Rank-GRPO template"
+            "answer-only requests a bare list using the ordering-neutral "
+            "[permutation of 1 through K] schema"
         ),
     )
     return parser

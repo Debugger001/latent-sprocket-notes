@@ -14,13 +14,13 @@ with a prompt/checkpoint mismatch.
 
 ## Prompt and grading contract
 
-The baseline data uses the archived MIND answer-only prompt verbatim. It asks
-for one bare JSON-style list, contains the historical fixed demonstration
-`[3, 7, 1, 2, 4, 5, 6, 8, 9, 10]`, and contains no reasoning or `<answer>`
-wrapper. The fixed example is retained because the starting adapter was trained
-with it; replacing it with the newer literal schema would be a separate prompt
-ablation. Generation explicitly uses Qwen3's non-thinking assistant prefix, so
-the sampled completion itself starts with the list instead of an unrequested
+The baseline prompt asks for one bare JSON-style list and contains no reasoning
+or `<answer>` wrapper. Its example is the ordering-neutral literal schema
+`[permutation of 1 through K]`, not a fixed sample ordering. This deliberately
+replaces the historical ten-item example in the archived SFT data so the prompt
+does not inject an arbitrary ranking and remains valid for every row's `K`.
+Generation explicitly uses Qwen3's non-thinking assistant prefix, so the
+sampled completion itself starts with the list instead of an unrequested
 `<think>` trace.
 
 Ranking reward uses the same lenient integer-list parser as MaskPO. A parsed
@@ -104,7 +104,7 @@ template:
 python scripts/prepare_mind.py \
   --news data/raw/mind/MINDsmall_train/news.tsv \
   --behaviors data/raw/mind/MINDsmall_train/behaviors.tsv \
-  --output-dir data/processed/mind-small-train-k20-24k-answer-only-seed42 \
+  --output-dir data/processed/mind-small-train-k20-24k-answer-only-schema-seed42 \
   --max-candidates 20 \
   --sample-size 24200 \
   --validation-fraction 0.008264462809917356 \

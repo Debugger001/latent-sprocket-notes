@@ -12,10 +12,10 @@ model:
   gradient_checkpointing: true
 
 data:
-  train_file: data/processed/mind-small-train-k20-24k-answer-only-seed42/train.jsonl
-  validation_file: data/processed/mind-small-train-k20-24k-answer-only-seed42/validation.jsonl
-  eval_file: data/processed/mind-small-dev-k20-10k-answer-only-seed42/eval.jsonl
-  prompt_style: answer-only-archived
+  train_file: data/processed/mind-small-train-k20-24k-answer-only-schema-seed42/train.jsonl
+  validation_file: data/processed/mind-small-train-k20-24k-answer-only-schema-seed42/validation.jsonl
+  eval_file: data/processed/mind-small-dev-k20-10k-answer-only-schema-seed42/eval.jsonl
+  prompt_style: answer-only-permutation-schema
   max_slate_size: 20
 
 generation:
@@ -62,12 +62,12 @@ tracking:
     mode: online
     project: maskpo-mind
     entity: franknlp
-    name: grpo-answer-only-qwen3-1p7b-b32-faststable
+    name: grpo-answer-only-schema-qwen3-1p7b-b32-faststable
     group: maskpo-baselines
-    tags: [mind, grpo, answer-only, qwen3-1.7b, p2-teacher-sft, batch32, baseline]
+    tags: [mind, grpo, answer-only, permutation-schema, qwen3-1.7b, p2-teacher-sft, batch32, baseline]
 
 output:
-  directory: outputs/grpo-answer-only-qwen3-1p7b-b32-faststable
+  directory: outputs/grpo-answer-only-schema-qwen3-1p7b-b32-faststable
   log_query_steps: 1
   checkpoint_rollout_steps: 50
   keep_checkpoints: 5

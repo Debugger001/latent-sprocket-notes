@@ -81,7 +81,7 @@ def test_prompt_only_exposes_allowed_article_fields_and_never_labels():
         assert forbidden not in prompt
 
 
-def test_answer_only_prompt_exactly_matches_archived_template():
+def test_answer_only_prompt_uses_ordering_neutral_schema():
     prompt = build_answer_only_reranking_prompt(_example())
 
     assert prompt == (
@@ -94,7 +94,7 @@ def test_answer_only_prompt_exactly_matches_archived_template():
         "list containing every candidate index from 1 to K exactly once, ordered "
         "from most likely clicked/read to least likely. Do not omit, duplicate, or "
         "invent indices. For this row, K=3, so return exactly 3 indices. Example: "
-        "[3, 7, 1, 2, 4, 5, 6, 8, 9, 10]\n\n"
+        "[permutation of 1 through K]\n\n"
         "Impression time: 11/13/2019 1:16:51 PM\n\n"
         "Clicked-news history, oldest to newest:\n"
         "H1. [news / politics] History title -- History abstract\n\n"
@@ -103,6 +103,7 @@ def test_answer_only_prompt_exactly_matches_archived_template():
         "2. [sports / nba] Candidate two -- Abstract two\n"
         "3. [weather / forecast] Candidate three -- Abstract three"
     )
+    assert "[3, 7, 1, 2, 4, 5, 6, 8, 9, 10]" not in prompt
     assert "<think>" not in prompt
     assert "<answer>" not in prompt
     assert SYNTHESIS_HEADER not in prompt
