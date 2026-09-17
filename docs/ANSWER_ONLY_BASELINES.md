@@ -19,7 +19,9 @@ for one bare JSON-style list, contains the historical fixed demonstration
 `[3, 7, 1, 2, 4, 5, 6, 8, 9, 10]`, and contains no reasoning or `<answer>`
 wrapper. The fixed example is retained because the starting adapter was trained
 with it; replacing it with the newer literal schema would be a separate prompt
-ablation.
+ablation. Generation explicitly uses Qwen3's non-thinking assistant prefix, so
+the sampled completion itself starts with the list instead of an unrequested
+`<think>` trace.
 
 Ranking reward uses the same lenient integer-list parser as MaskPO. A parsed
 list is scored exactly as emitted; invalid IDs and duplicates occupy positions,

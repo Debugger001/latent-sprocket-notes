@@ -671,8 +671,21 @@ def load_huggingface_answer_rl_trainer(
     if hasattr(reference_model, "config"):
         reference_model.config.use_cache = False
 
-    actor = HuggingFacePolicyBackend(actor_model, tokenizer)
-    reference = HuggingFacePolicyBackend(reference_model, tokenizer)
+    # Qwen3's default assistant prefix permits a ``<think>`` trace.  The
+    # archived answer-only task instead trains a bare JSON-style list, so use
+    # the tokenizer's explicit non-thinking prefix.  Without it the base
+    # model can spend the entire 2,048-token budget reasoning and never emit
+    # a gradeable list.
+    actor = HuggingFacePolicyBackend(
+        actor_model,
+        tokenizer,
+        enable_thinking=False,
+    )
+    reference = HuggingFacePolicyBackend(
+        reference_model,
+        tokenizer,
+        enable_thinking=False,
+    )
     trainable = tuple(actor.trainable_parameters())
     if not trainable:
         raise RuntimeError("the actor adapter has no trainable parameters")

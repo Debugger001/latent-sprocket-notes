@@ -29,6 +29,18 @@ class _TinyTokenizer:
     padding_side = "right"
 
 
+class _ChatTokenizer(_TinyTokenizer):
+    def __init__(self) -> None:
+        self.enable_thinking_values: list[bool] = []
+
+    def apply_chat_template(self, messages, **kwargs):
+        assert messages == [{"role": "user", "content": "rank this"}]
+        assert kwargs["tokenize"] is False
+        assert kwargs["add_generation_prompt"] is True
+        self.enable_thinking_values.append(kwargs["enable_thinking"])
+        return "rendered prompt"
+
+
 class _NonCanonicalTokenizer(_TinyTokenizer):
     all_special_ids = []
 
@@ -845,6 +857,20 @@ def test_sampling_config_keeps_exact_generation_defaults():
         "top_k": 20,
         "top_p": 0.95,
     }
+
+
+def test_huggingface_prompt_renderer_honors_thinking_mode():
+    tokenizer = _ChatTokenizer()
+    thinking = HuggingFacePolicyBackend(
+        _FullLogitModel(), tokenizer, enable_thinking=True
+    )
+    non_thinking = HuggingFacePolicyBackend(
+        _FullLogitModel(), tokenizer, enable_thinking=False
+    )
+
+    assert thinking.render_user_prompt("rank this") == "rendered prompt"
+    assert non_thinking.render_user_prompt("rank this") == "rendered prompt"
+    assert tokenizer.enable_thinking_values == [True, False]
 
 
 def test_huggingface_logps_keep_only_prediction_positions_and_train_for_gradients():

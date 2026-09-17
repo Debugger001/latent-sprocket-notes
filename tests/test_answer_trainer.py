@@ -382,3 +382,5 @@ def test_loader_resumes_only_actor_and_honors_separate_device_maps(
     ]
     assert next(trainer.actor.trainable_parameters()).requires_grad
     assert not next(trainer.reference.model.parameters()).requires_grad
+    assert trainer.actor.enable_thinking is False
+    assert trainer.reference.enable_thinking is False

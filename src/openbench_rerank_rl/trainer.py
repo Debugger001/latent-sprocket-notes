@@ -819,9 +819,18 @@ class MaskPOTrainer:
 class HuggingFacePolicyBackend:
     """Adapter for a decoder-only Transformers/PEFT policy."""
 
-    def __init__(self, model: Any, tokenizer: Any) -> None:
+    def __init__(
+        self,
+        model: Any,
+        tokenizer: Any,
+        *,
+        enable_thinking: bool = True,
+    ) -> None:
+        if type(enable_thinking) is not bool:
+            raise TypeError("enable_thinking must be a boolean")
         self.model = model
         self.tokenizer = tokenizer
+        self.enable_thinking = enable_thinking
         self._supports_logits_to_keep = self._model_supports_logits_to_keep()
         if self.tokenizer.pad_token_id is None:
             if self.tokenizer.eos_token_id is None:
@@ -859,7 +868,7 @@ class HuggingFacePolicyBackend:
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=True,
+                enable_thinking=self.enable_thinking,
             )
         except TypeError:
             # Some compatible tokenizers predate the Qwen ``enable_thinking``
