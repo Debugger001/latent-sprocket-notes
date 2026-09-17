@@ -21,7 +21,16 @@ from openbench_rerank_rl.mind import (
     filter_examples,
     load_examples,
 )
-from openbench_rerank_rl.prompts import build_reranking_prompt
+from openbench_rerank_rl.prompts import (
+    build_answer_only_reranking_prompt,
+    build_reranking_prompt,
+)
+
+
+PROMPT_BUILDERS = {
+    "rubric": build_reranking_prompt,
+    "answer-only": build_answer_only_reranking_prompt,
+}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -63,7 +72,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--include-prompts",
         action="store_true",
-        help="include the latest four-rubric prompt in each output row",
+        help="include the selected prompt template in each output row",
+    )
+    parser.add_argument(
+        "--prompt-style",
+        choices=tuple(PROMPT_BUILDERS),
+        default="rubric",
+        help=(
+            "prompt template used with --include-prompts (default: rubric); "
+            "answer-only reproduces the archived GRPO/Rank-GRPO template"
+        ),
     )
     return parser
 
@@ -74,7 +92,12 @@ def _article_dict(article: MindNews) -> dict[str, str]:
     return article.prompt_dict()
 
 
-def _example_dict(example: MindExample, *, include_prompt: bool) -> dict[str, object]:
+def _example_dict(
+    example: MindExample,
+    *,
+    include_prompt: bool,
+    prompt_style: str = "rubric",
+) -> dict[str, object]:
     row: dict[str, object] = {
         "id": example.impression_id,
         "dataset": "mind",
@@ -87,7 +110,7 @@ def _example_dict(example: MindExample, *, include_prompt: bool) -> dict[str, ob
         "k": example.k,
     }
     if include_prompt:
-        row["prompt"] = build_reranking_prompt(example)
+        row["prompt"] = PROMPT_BUILDERS[prompt_style](example)
     return row
 
 
@@ -96,10 +119,15 @@ def _write_jsonl(
     examples: list[MindExample],
     *,
     include_prompts: bool,
+    prompt_style: str = "rubric",
 ) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         for example in examples:
-            row = _example_dict(example, include_prompt=include_prompts)
+            row = _example_dict(
+                example,
+                include_prompt=include_prompts,
+                prompt_style=prompt_style,
+            )
             handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
             handle.write("\n")
 
@@ -137,11 +165,13 @@ def main() -> None:
         args.output_dir / "train.jsonl",
         train,
         include_prompts=args.include_prompts,
+        prompt_style=args.prompt_style,
     )
     _write_jsonl(
         args.output_dir / "validation.jsonl",
         validation,
         include_prompts=args.include_prompts,
+        prompt_style=args.prompt_style,
     )
     summary = {
         "source_rows": len(examples),
@@ -152,6 +182,8 @@ def main() -> None:
         "seed": args.seed,
         "max_history": args.max_history,
     }
+    if args.include_prompts:
+        summary["prompt_style"] = args.prompt_style
     if args.shuffle_training:
         summary["shuffle_training"] = True
     (args.output_dir / "summary.json").write_text(

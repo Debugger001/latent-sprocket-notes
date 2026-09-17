@@ -1,5 +1,14 @@
 """MaskPO utilities for public fixed-slate MIND reranking experiments."""
 
+from .answer_rl import (
+    AnswerRLCompletionCredit,
+    AnswerRLGroupCredit,
+    AnswerTokenSegmentation,
+    normalize_rank_reward_matrix,
+    prepare_answer_rl_group,
+    rank_grpo_exp_inf_rewards,
+    segment_json_answer_tokens,
+)
 from .advantages import (
     MaskPOConfig,
     aggregate_mask_advantages,
@@ -11,7 +20,14 @@ from .advantages import (
     rubric_delta_advantages,
 )
 from .evaluation import aggregate_evaluations, evaluate_prediction
-from .losses import BNPOLossOutput, bnpo_loss, tokenwise_bnpo_loss
+from .losses import (
+    AnswerRLLossOutput,
+    BNPOLossOutput,
+    bnpo_loss,
+    rank_grpo_loss,
+    sequence_grpo_loss,
+    tokenwise_bnpo_loss,
+)
 from .masking import (
     MASKED_RUBRIC_CONTENT,
     build_counterfactual_prefix,
@@ -24,6 +40,10 @@ from .rewards import evaluate_format, format_reward, ranking_reward
 from .routing import route_token_advantages
 
 __all__ = [
+    "AnswerRLCompletionCredit",
+    "AnswerRLGroupCredit",
+    "AnswerRLLossOutput",
+    "AnswerTokenSegmentation",
     "BNPOLossOutput",
     "MASKED_RUBRIC_CONTENT",
     "MaskPOConfig",
@@ -40,9 +60,13 @@ __all__ = [
     "grpo_group_advantages",
     "mrr_at_k",
     "ndcg_at_k",
+    "normalize_rank_reward_matrix",
     "parse_answer",
     "parse_completion_structure",
     "plan_counterfactual_probes",
+    "prepare_answer_rl_group",
+    "rank_grpo_exp_inf_rewards",
+    "rank_grpo_loss",
     "rank_grpo_position_advantages",
     "rank_shift_mask_residuals",
     "ranking_reward",
@@ -51,6 +75,8 @@ __all__ = [
     "route_token_advantages",
     "rubric_delta_advantages",
     "score_maskpo_group",
+    "segment_json_answer_tokens",
+    "sequence_grpo_loss",
     "slate_auc",
     "tokenwise_bnpo_loss",
 ]

@@ -187,6 +187,87 @@ def test_prepare_cli_is_reproducible_and_does_not_copy_raw_files(tmp_path):
     ]
     assert len(rows) == 2  # no-positive I3 is filtered by default
     assert all("prompt" in row for row in rows)
+    assert json.loads(
+        (output_a / "summary.json").read_text(encoding="utf-8")
+    )["prompt_style"] == "rubric"
+
+
+def test_prepare_cli_answer_only_changes_only_prompt_template(tmp_path):
+    root = Path(__file__).parents[1]
+    script = root / "scripts" / "prepare_mind.py"
+    rubric_output = tmp_path / "rubric"
+    answer_output = tmp_path / "answer-only"
+    base_command = [
+        sys.executable,
+        str(script),
+        "--news",
+        str(FIXTURES / "news.tsv.fixture"),
+        "--behaviors",
+        str(FIXTURES / "behaviors.tsv.fixture"),
+        "--validation-fraction",
+        "0.5",
+        "--seed",
+        "123",
+        "--shuffle-training",
+        "--include-prompts",
+    ]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(root / "src") + os.pathsep + environment.get(
+        "PYTHONPATH", ""
+    )
+    subprocess.run(
+        base_command + ["--output-dir", str(rubric_output)],
+        check=True,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        base_command
+        + [
+            "--prompt-style",
+            "answer-only",
+            "--output-dir",
+            str(answer_output),
+        ],
+        check=True,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    for split in ("train", "validation"):
+        rubric_rows = [
+            json.loads(line)
+            for line in (rubric_output / f"{split}.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        answer_rows = [
+            json.loads(line)
+            for line in (answer_output / f"{split}.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert len(rubric_rows) == len(answer_rows)
+        for rubric_row, answer_row in zip(rubric_rows, answer_rows, strict=True):
+            rubric_prompt = rubric_row.pop("prompt")
+            answer_prompt = answer_row.pop("prompt")
+            assert answer_row == rubric_row
+            assert "<think>" in rubric_prompt
+            assert "Return only a JSON-style list" in answer_prompt
+            assert "<think>" not in answer_prompt
+            assert "<answer>" not in answer_prompt
+
+    rubric_summary = json.loads(
+        (rubric_output / "summary.json").read_text(encoding="utf-8")
+    )
+    answer_summary = json.loads(
+        (answer_output / "summary.json").read_text(encoding="utf-8")
+    )
+    assert rubric_summary.pop("prompt_style") == "rubric"
+    assert answer_summary.pop("prompt_style") == "answer-only"
+    assert answer_summary == rubric_summary
 
 
 def test_prepare_cli_shuffle_only_changes_training_order(tmp_path):

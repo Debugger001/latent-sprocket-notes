@@ -135,6 +135,21 @@ def extract_answer_block(text: str) -> str:
     return match.group(1).strip() if match else text
 
 
+def find_answer_index_list(text: str) -> ParsedIndexList | None:
+    """Locate the same lenient answer list used by :func:`parse_answer`.
+
+    Keeping the source spans lets rank-level objectives route credit to the
+    graded list rather than an incidental list in preceding malformed prose.
+    """
+
+    match = re.search(
+        r"<answer>(.*?)</answer>", text, flags=re.DOTALL | re.IGNORECASE
+    )
+    if match is None:
+        return find_index_list(text)
+    return find_index_list(match.group(1), offset=match.start(1))
+
+
 def parse_answer(text: str) -> list[int] | None:
     """Leniently recover an answer list using identical original/probe logic."""
 
@@ -142,7 +157,8 @@ def parse_answer(text: str) -> list[int] | None:
     # complete one exists, but tolerate a missing envelope by scanning the
     # generated text.  Do not rescue a malformed explicit answer from an
     # incidental list in its reasoning.
-    return parse_index_list(extract_answer_block(text))
+    parsed = find_answer_index_list(text)
+    return list(parsed.values) if parsed is not None else None
 
 
 def strict_permutation(order: Iterable[int], k: int) -> bool:

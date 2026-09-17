@@ -44,6 +44,12 @@ generated checkpoints.
 The precise equations and edge-case rules are in
 [docs/ALGORITHMS.md](docs/ALGORITHMS.md).
 
+Answer-only GRPO and paper-faithful Rank-GRPO controls are specified separately
+in [docs/ANSWER_ONLY_BASELINES.md](docs/ANSWER_ONLY_BASELINES.md). Both use the
+archived Phase-2 teacher answer-only adapter and its bare-list prompt, while
+matching the stable MaskPO run's shared optimizer, sampling, batching, data,
+and validation settings.
+
 ## Quick start
 
 Create a lightweight environment and run the model-independent test suite:
@@ -69,6 +75,10 @@ manifest:
 ```bash
 python scripts/import_archived_adapter.py /path/to/openbench-rerank-rl-26b4998-audit-copy.zip
 ```
+
+For either answer-only baseline, add
+`--adapter p2_teacher_answer_only_sft`; the importer verifies that adapter's
+separately pinned weight checksum.
 
 Request access to [`yjw1029/MIND`](https://huggingface.co/datasets/yjw1029/MIND),
 review the upstream terms, authenticate with `hf auth login`, and download the
@@ -127,12 +137,14 @@ and newly chosen runtime defaults.
 ```text
 configs/                         Reproducible MaskPO run configuration
 docs/ALGORITHMS.md               Exact reward, counterfactual, routing, loss rules
+docs/ANSWER_ONLY_BASELINES.md    GRPO/Rank-GRPO prompt, math, and run controls
 docs/REPRODUCING.md              End-to-end local and GPU-server instructions
 scripts/download_mind.py         Gated official-data download helper
 scripts/import_archived_adapter.py  Selective adapter import from the handoff ZIP
 scripts/prepare_mind.py          TSV parsing and deterministic JSONL preparation
 scripts/evaluate_outputs.py      Matching offline lenient grader and aggregates
 scripts/train_maskpo.py          Transformers/PEFT training entry point
+scripts/train_answer_rl.py       Answer-only GRPO and Rank-GRPO entry point
 src/openbench_rerank_rl/         Model-independent algorithm and runtime code
 tests/                           Synthetic, redistributable unit tests
 ```

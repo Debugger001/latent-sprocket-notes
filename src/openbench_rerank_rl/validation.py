@@ -1,4 +1,4 @@
-"""Deterministic online validation for MaskPO training runs.
+"""Deterministic online validation for reranking-policy training runs.
 
 Validation deliberately reuses the same lenient parser, ranking reward, and
 nine-check format grader as training.  It generates one greedy completion for
@@ -17,6 +17,7 @@ from .evaluation import (
     aggregate_evaluations,
     evaluate_prediction,
 )
+from .parsers import find_index_list, parse_answer, strict_permutation
 from .rewards import evaluate_format
 from .trainer import PolicyBackend, SamplingConfig, TrainingExample
 
@@ -53,6 +54,37 @@ class ValidationResult:
         for index, rate in enumerate(self.rubric_header_rates, start=1):
             values[f"format_rubric_header_{index}_rate"] = rate
         return values
+
+
+@dataclass(frozen=True)
+class AnswerOnlyValidationResult:
+    """Aggregate metrics for a bare-list answer-only policy.
+
+    Ranking remains lenient whenever an integer list can be recovered.  The
+    format diagnostics are deliberately separate: ``bare_list_rate`` requires
+    the entire visible completion to consist of that one list, while
+    ``valid_unique_ids_rate`` and ``exact_permutation_rate`` describe its
+    candidate-ID quality.
+    """
+
+    rows: int
+    dataset_fingerprint: str
+    ndcg: float
+    parse_rate: float
+    bare_list_rate: float
+    valid_unique_ids_rate: float
+    exact_permutation_rate: float
+
+    def as_dict(self) -> dict[str, float | int | str]:
+        return {
+            "rows": self.rows,
+            "dataset_fingerprint": self.dataset_fingerprint,
+            "ndcg": self.ndcg,
+            "parse_rate": self.parse_rate,
+            "bare_list_rate": self.bare_list_rate,
+            "valid_unique_ids_rate": self.valid_unique_ids_rate,
+            "exact_permutation_rate": self.exact_permutation_rate,
+        }
 
 
 def fixed_validation_examples(
@@ -176,4 +208,75 @@ def run_greedy_validation(
             check.valid_unique_ids for check in format_checks
         ),
         exact_permutation_rate=float(aggregate["exact_permutation_rate"]),
+    )
+
+
+def run_answer_only_validation(
+    actor: PolicyBackend,
+    examples: Sequence[TrainingExample],
+    *,
+    max_new_tokens: int = 2048,
+    generation_batch_size: int = 4,
+) -> AnswerOnlyValidationResult:
+    """Greedily validate the direct JSON-list contract used by both baselines."""
+
+    if not examples:
+        raise ValueError("validation examples must not be empty")
+    if generation_batch_size <= 0:
+        raise ValueError("generation_batch_size must be positive")
+
+    sampling = SamplingConfig(
+        do_sample=False,
+        max_new_tokens=max_new_tokens,
+        original_batch_size=generation_batch_size,
+        counterfactual_batch_size=generation_batch_size,
+    )
+    evaluations: list[PredictionEvaluation] = []
+    bare_checks: list[bool] = []
+    valid_unique_checks: list[bool] = []
+    exact_checks: list[bool] = []
+    for start in range(0, len(examples), generation_batch_size):
+        batch = examples[start : start + generation_batch_size]
+        prefixes = [actor.render_user_prompt(example.prompt) for example in batch]
+        completions = tuple(actor.generate(prefixes, sampling))
+        if len(completions) != len(batch):
+            raise RuntimeError(
+                "policy backend returned a different number of validation "
+                "completions than prompts"
+            )
+        for example, completion in zip(batch, completions, strict=True):
+            evaluations.append(
+                evaluate_prediction(
+                    completion.text,
+                    positives=example.positives,
+                    slate_k=example.slate_k,
+                )
+            )
+            parsed = parse_answer(completion.text)
+            values = [] if parsed is None else parsed
+            located = find_index_list(completion.text)
+            bare_checks.append(
+                located is not None
+                and not completion.text[: located.list_span.start].strip()
+                and not completion.text[located.list_span.end :].strip()
+            )
+            valid_unique_checks.append(
+                parsed is not None
+                and len(values) == len(set(values))
+                and all(1 <= item <= example.slate_k for item in values)
+            )
+            exact_checks.append(
+                parsed is not None and strict_permutation(values, example.slate_k)
+            )
+
+    aggregate = aggregate_evaluations(evaluations)
+    rows = len(examples)
+    return AnswerOnlyValidationResult(
+        rows=rows,
+        dataset_fingerprint=validation_fingerprint(examples),
+        ndcg=float(aggregate["ndcg_at_k"]),
+        parse_rate=float(aggregate["parse_rate"]),
+        bare_list_rate=sum(bare_checks) / rows,
+        valid_unique_ids_rate=sum(valid_unique_checks) / rows,
+        exact_permutation_rate=sum(exact_checks) / rows,
     )

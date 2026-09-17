@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Import the audited Phase-2 rubric SFT adapter from the handoff archive.
+"""Import an audited Phase-2 MIND adapter from the handoff archive.
 
 The archive is intentionally not unpacked wholesale.  Only the files beneath
-``models/mind/qwen3-1.7b/p2_rubric_reasoning_sft`` are copied, and the resulting
-directory remains gitignored.
+the selected adapter directory are copied, and the resulting directory remains
+gitignored.
 """
 
 from __future__ import annotations
@@ -17,8 +17,9 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 
-ADAPTER_SUFFIX = PurePosixPath(
-    "models/mind/qwen3-1.7b/p2_rubric_reasoning_sft"
+ADAPTERS = (
+    "p2_rubric_reasoning_sft",
+    "p2_teacher_answer_only_sft",
 )
 REQUIRED_FILES = frozenset(
     {
@@ -33,9 +34,8 @@ REQUIRED_FILES = frozenset(
 # Canonical checksums from the audited public handoff.  Verifying every copied
 # file makes the starting point reproducible without hashing unrelated 4 GB of
 # material in the outer archive.
-EXPECTED_SHA256 = {
+COMMON_EXPECTED_SHA256 = {
     "adapter_config.json": "8430f527999143b4c01b91ab71e089fd57f31702e201ede589229ee662a4ed90",
-    "adapter_model.safetensors": "2f9cf9f00d430d914efe6fae21f81378a8567de4932640c114d01f2d74747818",
     "added_tokens.json": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680",
     "chat_template.jinja": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
     "config.json": "8765bfdb0d5e7fbc73263401e44a30f9be8f4889cda3536c27d4124c9b3b3d9b",
@@ -46,24 +46,40 @@ EXPECTED_SHA256 = {
     "tokenizer_config.json": "443bfa629eb16387a12edbf92a76f6a6f10b2af3b53d87ba1550adfcf45f7fa0",
     "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
 }
+EXPECTED_MODEL_SHA256 = {
+    "p2_rubric_reasoning_sft": (
+        "2f9cf9f00d430d914efe6fae21f81378a8567de4932640c114d01f2d74747818"
+    ),
+    "p2_teacher_answer_only_sft": (
+        "79889fe976e5fe448212c4fbf83abd7f39f3942c53127139ede7e60af31c08af"
+    ),
+}
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path, help="path to the audit-copy ZIP")
     parser.add_argument(
+        "--adapter",
+        choices=ADAPTERS,
+        default="p2_rubric_reasoning_sft",
+        help="audited MIND adapter to import (default: %(default)s)",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("artifacts/adapters/p2_rubric_reasoning_sft"),
-        help="new destination directory (default: %(default)s)",
+        help="new destination directory (default: artifacts/adapters/ADAPTER)",
     )
     return parser
 
 
-def _member_map(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
+def _member_map(
+    archive: zipfile.ZipFile,
+    adapter_suffix: PurePosixPath,
+) -> dict[str, zipfile.ZipInfo]:
     """Locate exactly one flat adapter directory inside ``archive``."""
 
-    suffix_parts = ADAPTER_SUFFIX.parts
+    suffix_parts = adapter_suffix.parts
     candidates: dict[str, dict[str, zipfile.ZipInfo]] = {}
     for info in archive.infolist():
         path = PurePosixPath(info.filename)
@@ -80,7 +96,7 @@ def _member_map(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
     matching = [files for files in candidates.values() if REQUIRED_FILES <= files.keys()]
     if len(matching) != 1:
         raise SystemExit(
-            "expected exactly one p2_rubric_reasoning_sft directory containing "
+            f"expected exactly one {adapter_suffix.name} directory containing "
             f"{sorted(REQUIRED_FILES)}; found {len(matching)}"
         )
     return matching[0]
@@ -102,7 +118,16 @@ def _copy_and_hash(
 def main() -> None:
     args = _parser().parse_args()
     archive_path = args.archive.expanduser().resolve()
-    output_dir = args.output_dir.expanduser().resolve()
+    adapter_suffix = PurePosixPath(
+        "models/mind/qwen3-1.7b"
+    ) / args.adapter
+    output_dir = (
+        args.output_dir or Path("artifacts/adapters") / args.adapter
+    ).expanduser().resolve()
+    expected_sha256 = {
+        **COMMON_EXPECTED_SHA256,
+        "adapter_model.safetensors": EXPECTED_MODEL_SHA256[args.adapter],
+    }
     if not archive_path.is_file():
         raise SystemExit(f"archive does not exist: {archive_path}")
     if output_dir.exists():
@@ -113,7 +138,7 @@ def main() -> None:
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive_path) as archive:
-        members = _member_map(archive)
+        members = _member_map(archive, adapter_suffix)
         with tempfile.TemporaryDirectory(
             prefix=f".{output_dir.name}.", dir=output_dir.parent
         ) as temporary:
@@ -122,7 +147,7 @@ def main() -> None:
             for filename, info in sorted(members.items()):
                 destination = temporary_dir / filename
                 sha256 = _copy_and_hash(archive, info, destination)
-                expected = EXPECTED_SHA256.get(filename)
+                expected = expected_sha256.get(filename)
                 if expected is None or sha256 != expected:
                     raise SystemExit(
                         f"checksum mismatch for {filename}: expected {expected!r}, "
@@ -134,7 +159,7 @@ def main() -> None:
                 json.dumps(
                     {
                         "source_archive_name": archive_path.name,
-                        "adapter": str(ADAPTER_SUFFIX),
+                        "adapter": str(adapter_suffix),
                         "files": manifest,
                     },
                     indent=2,

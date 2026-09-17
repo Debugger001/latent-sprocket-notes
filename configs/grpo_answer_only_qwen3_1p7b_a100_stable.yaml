@@ -1,0 +1,73 @@
+# Paper-faithful answer-only GRPO control for the stable MaskPO comparison.
+# Shared rollout/optimizer settings match maskpo_qwen3_1p7b_a100_stable.yaml;
+# the sequence-balanced objective and asymmetric clip are method-specific.
+
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  adapter_path: artifacts/adapters/p2_teacher_answer_only_sft
+  dtype: bfloat16
+  trust_remote_code: false
+  device_map: auto
+  gradient_checkpointing: true
+
+data:
+  train_file: data/processed/mind-small-train-k20-24k-answer-only-seed42/train.jsonl
+  validation_file: data/processed/mind-small-train-k20-24k-answer-only-seed42/validation.jsonl
+  eval_file: data/processed/mind-small-dev-k20-10k-answer-only-seed42/eval.jsonl
+  prompt_style: answer-only-archived
+  max_slate_size: 20
+
+generation:
+  num_siblings: 4
+  do_sample: true
+  temperature: 0.6
+  top_k: 20
+  top_p: 0.95
+  max_new_tokens: 2048
+  batch_size: 4
+
+algorithm:
+  name: grpo
+  rank_metric: ndcg
+  lenient_integer_list_grading: true
+  positive_first_occurrence_only: true
+  # Matches TRL/Rank-GRPO group scaling (sample std plus epsilon).
+  normalization_eps: 1.0e-4
+  clip_low: 0.20
+  clip_high: 0.26
+
+optimization:
+  objective: paper_sequence_grpo
+  reference_kl_coefficient: 0.01
+  learning_rate: 5.0e-6
+  weight_decay: 0.0
+  effective_prompt_batch_size: 8
+  effective_original_batch_size: 32
+  gradient_accumulation_steps: 8
+  ppo_passes: 1
+  max_grad_norm: 1.0
+  max_rollout_steps: 3000
+  seed: 42
+
+validation:
+  enabled: true
+  rows: 200
+  interval_rollout_steps: 10
+  generation_batch_size: 16
+  max_new_tokens: 2048
+
+tracking:
+  wandb:
+    mode: online
+    project: maskpo-mind
+    entity: franknlp
+    name: grpo-answer-only-qwen3-1p7b-b32-faststable
+    group: maskpo-baselines
+    tags: [mind, grpo, answer-only, qwen3-1.7b, p2-teacher-sft, batch32, baseline]
+
+output:
+  directory: outputs/grpo-answer-only-qwen3-1p7b-b32-faststable
+  log_query_steps: 1
+  checkpoint_rollout_steps: 50
+  keep_checkpoints: 5

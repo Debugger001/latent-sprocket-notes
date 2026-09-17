@@ -14,6 +14,7 @@ from openbench_rerank_rl.trainer import (
 )
 from openbench_rerank_rl.validation import (
     fixed_validation_examples,
+    run_answer_only_validation,
     run_greedy_validation,
     validation_fingerprint,
 )
@@ -128,3 +129,32 @@ def test_greedy_validation_generates_once_per_prompt_and_reuses_shared_grader():
     assert result.exact_permutation_rate == pytest.approx(
         expected["exact_permutation_rate"]
     )
+
+
+def test_answer_only_validation_separates_lenient_reward_from_bare_list_format():
+    examples = tuple(_example(index) for index in range(4))
+    completions = (
+        "[1, 2]",
+        "  [2, 1]  ",
+        "extra prose [1, 2]",
+        "[1, 1]",
+    )
+    actor = ValidationBackend(completions)
+
+    result = run_answer_only_validation(
+        actor,
+        examples,
+        max_new_tokens=37,
+        generation_batch_size=3,
+    )
+
+    expected = aggregate_evaluations(
+        evaluate_prediction(text, positives={1}, slate_k=2) for text in completions
+    )
+    assert actor.batch_sizes == [3, 1]
+    assert result.rows == 4
+    assert result.ndcg == pytest.approx(expected["ndcg_at_k"])
+    assert result.parse_rate == 1.0
+    assert result.bare_list_rate == pytest.approx(3 / 4)
+    assert result.valid_unique_ids_rate == pytest.approx(3 / 4)
+    assert result.exact_permutation_rate == pytest.approx(3 / 4)

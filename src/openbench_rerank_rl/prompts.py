@@ -80,6 +80,29 @@ def _article_line(article: MindNews, prefix: str) -> str:
     return f"{prefix} [{category} / {subcategory}] {title} -- {abstract}"
 
 
+def _impression_context(example: MindExample) -> str:
+    """Render the label-free MIND fields shared by both prompt styles."""
+
+    if example.history:
+        history_lines = "\n".join(
+            _article_line(article, f"H{index}.")
+            for index, article in enumerate(example.history, start=1)
+        )
+    else:
+        history_lines = "(none)"
+    candidate_lines = "\n".join(
+        _article_line(article, f"{index}.")
+        for index, article in enumerate(example.candidates, start=1)
+    )
+    return (
+        f"Impression time: {_display_text(example.impression_time)}\n\n"
+        "Clicked-news history, oldest to newest:\n"
+        f"{history_lines}\n\n"
+        "Candidate news articles:\n"
+        f"{candidate_lines}"
+    )
+
+
 def build_reranking_prompt(example: MindExample) -> str:
     """Build the latest four-rubric MIND reranking prompt.
 
@@ -97,17 +120,6 @@ def build_reranking_prompt(example: MindExample) -> str:
         f"- {rubric.header} {rubric.description}" for rubric in RUBRICS
     )
     rubric_example = "\n".join(f"{rubric.header} ..." for rubric in RUBRICS)
-    if example.history:
-        history_lines = "\n".join(
-            _article_line(article, f"H{index}.")
-            for index, article in enumerate(example.history, start=1)
-        )
-    else:
-        history_lines = "(none)"
-    candidate_lines = "\n".join(
-        _article_line(article, f"{index}.")
-        for index, article in enumerate(example.candidates, start=1)
-    )
 
     return (
         "You are ranking a logged news impression slate for a user.\n"
@@ -137,9 +149,35 @@ def build_reranking_prompt(example: MindExample) -> str:
         "<answer>\n"
         "[permutation of 1 through K]\n"
         "</answer>\n\n"
-        f"Impression time: {_display_text(example.impression_time)}\n\n"
-        "Clicked-news history, oldest to newest:\n"
-        f"{history_lines}\n\n"
-        "Candidate news articles:\n"
-        f"{candidate_lines}"
+        f"{_impression_context(example)}"
+    )
+
+
+def build_answer_only_reranking_prompt(example: MindExample) -> str:
+    """Build the exact archived MIND answer-only prompt.
+
+    The fixed ten-item example is intentionally preserved even when a row has a
+    different ``K``.  The archived answer-only SFT checkpoint was trained with
+    this wording, so changing the demonstration would create a prompt/checkpoint
+    mismatch for the GRPO and Rank-GRPO baselines.
+    """
+
+    k = example.k
+    if k < 1:
+        raise ValueError(
+            "an answer-only reranking prompt requires at least one candidate"
+        )
+
+    return (
+        "You are ranking a logged news impression slate for a user.\n"
+        "Given the user's clicked-news history, the impression timestamp, and the "
+        "candidate news articles, rank candidates by how likely the user is to "
+        "click/read them in this impression.\n"
+        "Use only the candidate indices shown below; do not invent news items.\n\n"
+        "Return only a JSON-style list of candidate indices. Return a JSON-style "
+        "list containing every candidate index from 1 to K exactly once, ordered "
+        "from most likely clicked/read to least likely. Do not omit, duplicate, or "
+        f"invent indices. For this row, K={k}, so return exactly {k} indices. "
+        "Example: [3, 7, 1, 2, 4, 5, 6, 8, 9, 10]\n\n"
+        f"{_impression_context(example)}"
     )
